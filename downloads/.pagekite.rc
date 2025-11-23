@@ -1,0 +1,25 @@
+###[ Current settings for pagekite.py v1.5.2.201011. ]#########
+#
+## NOTE: This file may be rewritten/reordered by pagekite.py.
+#
+
+##[ Default kite and account details ]##
+kitename   = XX.pagekite.me
+kitesecret = 123456789
+
+##[ Front-end settings: use pagekite.net defaults ]##
+defaults
+
+##[ Back-ends and local services ]##
+service_on  = http:@kitename        : localhost:80      : @kitesecret
+
+
+
+
+
+##[ Miscellaneous settings ]##
+savefile = /home/XX/.pagekite.rc
+max_read_bytes = 16256x3.100
+
+###[ End of pagekite.py configuration ]#########
+END
