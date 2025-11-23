@@ -1,0 +1,45 @@
+{
+    "plugins": {
+        "battery-monitor": {
+            "enabled": true,
+            "load": true,
+            "name": "Battery Monitor",
+            "version": "1.0.0",
+            "description": "Real-time PiSugar battery monitoring with graphical display",
+            "author": "Net Storm",
+            "php": "php/battery-monitor.php",
+            "script": "scripts/shbattery_",
+            "css": "",
+            "js": "",
+            "dependencies": [],
+            "data_sources": [
+                "tmp/batmon/status.tmp",
+                "tmp/batmon/alert.tmp"
+            ],
+            "visibility_after_offline": 360,
+            "container_id": "pluginBatteryMonitor"
+        },
+        "network-monitor": {
+            "enabled": true,
+            "load": true,
+            "name": "Network Monitor",
+            "version": "1.0.0",
+            "description": "Real-time network monitoring with smart switching",
+            "author": "Net Storm",
+            "php": "php/network-monitor.php",
+            "script": "scripts/shnetmon_",
+            "css": "",
+            "js": "",
+            "dependencies": [],
+            "data_sources": [
+                "tmp/netmon/status.tmp"
+            ],
+            "visibility_after_offline": 600,
+            "container_id": "pluginNetworkMonitor"
+        }
+    },
+    "manifest_version": "1.0.0",
+    "last_updated": "2025-11-18 15:34:46",
+    "auto_generated": true,
+    "generator": "plugins-loader.php v1.0.0"
+}

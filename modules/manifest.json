@@ -1,0 +1,23 @@
+{
+    "version": "1.0.0",
+    "modules": {
+        "ocr": {
+            "name": "OCR Text Extraction",
+            "description": "Extract text from images using Google Cloud Vision API",
+            "enabled": true,
+            "version": "2.0.0",
+            "files": {
+                "init": "ocr/init.php",
+                "js": "ocr/ocr.js",
+                "css": "ocr/ocr.css"
+            },
+            "keybindings": {
+                "o": "extractText"
+            },
+            "priority": 10,
+            "requires": [
+                "config/api-keys.php"
+            ]
+        }
+    }
+}

@@ -1,0 +1,142 @@
+# Camera Control System - Apache Configuration
+# Optimized for performance with dynamic content protection
+
+# =============================================================================
+# CORS HEADERS (Allow same-origin and cross-origin requests)
+# =============================================================================
+<IfModule mod_headers.c>
+    # Allow CORS for all requests
+    Header always set Access-Control-Allow-Origin "*"
+    Header always set Access-Control-Allow-Methods "GET, POST, OPTIONS"
+    Header always set Access-Control-Allow-Headers "Content-Type, X-Requested-With"
+</IfModule>
+
+# Handle OPTIONS preflight requests
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{REQUEST_METHOD} OPTIONS
+    RewriteRule ^(.*)$ $1 [R=204,L]
+</IfModule>
+
+# =============================================================================
+# SECURITY HEADERS
+# =============================================================================
+<IfModule mod_headers.c>
+    # Security headers (always apply)
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+# =============================================================================
+# BROWSER CACHING - STATIC ASSETS ONLY
+# =============================================================================
+<IfModule mod_expires.c>
+    ExpiresActive On
+
+    # Default: No cache
+    ExpiresDefault "access plus 0 seconds"
+
+    # CSS & JavaScript (static files only)
+    ExpiresByType text/css "access plus 1 year"
+    ExpiresByType application/javascript "access plus 1 year"
+    ExpiresByType application/x-javascript "access plus 1 year"
+
+    # Images (static only - NOT camera images)
+    ExpiresByType image/png "access plus 1 year"
+    ExpiresByType image/jpeg "access plus 1 year"
+    ExpiresByType image/gif "access plus 1 year"
+    ExpiresByType image/webp "access plus 1 year"
+    ExpiresByType image/x-icon "access plus 1 year"
+
+    # Fonts
+    ExpiresByType font/woff2 "access plus 1 year"
+    ExpiresByType font/woff "access plus 1 year"
+    ExpiresByType application/font-woff2 "access plus 1 year"
+
+    # Videos (static background only)
+    ExpiresByType video/mp4 "access plus 1 year"
+</IfModule>
+
+<IfModule mod_headers.c>
+    # Cache static assets in /assets/ directory ONLY
+    <FilesMatch "\.(css|js)$">
+        <If "%{REQUEST_URI} =~ m#^/cam1-v1/assets/#">
+            Header set Cache-Control "public, max-age=31536000, immutable"
+        </If>
+    </FilesMatch>
+
+    # Cache static images in /assets/images/ ONLY
+    <FilesMatch "\.(png|gif|ico|woff|woff2|ttf|svg|mp4|webm)$">
+        <If "%{REQUEST_URI} =~ m#^/cam1-v1/assets/#">
+            Header set Cache-Control "public, max-age=31536000, immutable"
+        </If>
+    </FilesMatch>
+
+    # NEVER cache camera images (pic.jpg, live.jpg, test.jpg, buffer.jpg)
+    <FilesMatch "^(pic|live|test|buffer)\.(jpg|jpeg|png)$">
+        Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0, post-check=0, pre-check=0"
+        Header set Pragma "no-cache"
+        Header set Expires "0"
+        FileETag None
+    </FilesMatch>
+
+    # NEVER cache PHP files
+    <FilesMatch "\.(php|html|htm)$">
+        Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0, post-check=0, pre-check=0"
+        Header set Pragma "no-cache"
+        Header set Expires "0"
+    </FilesMatch>
+</IfModule>
+
+# =============================================================================
+# GZIP COMPRESSION
+# =============================================================================
+<IfModule mod_deflate.c>
+    # Compress HTML, CSS, JavaScript, Text, XML
+    AddOutputFilterByType DEFLATE text/html
+    AddOutputFilterByType DEFLATE text/css
+    AddOutputFilterByType DEFLATE text/javascript
+    AddOutputFilterByType DEFLATE application/javascript
+    AddOutputFilterByType DEFLATE application/x-javascript
+    AddOutputFilterByType DEFLATE text/plain
+    AddOutputFilterByType DEFLATE text/xml
+    AddOutputFilterByType DEFLATE application/json
+
+    # Don't compress images/videos (already compressed)
+    SetEnvIfNoCase Request_URI \.(?:gif|jpe?g|png|webp|mp4|webm)$ no-gzip dont-vary
+</IfModule>
+
+# =============================================================================
+# PREVENT DIRECTORY BROWSING
+# =============================================================================
+Options -Indexes
+
+# =============================================================================
+# KEEP-ALIVE
+# =============================================================================
+<IfModule mod_headers.c>
+    Header set Connection keep-alive
+</IfModule>
+
+# =============================================================================
+# ETAG (Disable - we use versioned URLs)
+# =============================================================================
+FileETag None
+
+# =============================================================================
+# PROTECT SENSITIVE FILES
+# =============================================================================
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "(\.env|composer\.(json|lock)|package\.json|\.gitignore|phpunit\.xml)$">
+    Require all denied
+</FilesMatch>
+
+# =============================================================================
+# DEFAULT CHARSET
+# =============================================================================
+AddDefaultCharset UTF-8

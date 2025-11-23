@@ -1,0 +1,610 @@
+/* Fonts loaded asynchronously in HTML head for better performance */
+
+.data-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    grid-gap: 15px;
+    margin-bottom: 5px;
+    width: 100%;
+}
+
+.data-grid2 {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-gap: 5px;
+    margin-bottom: 5px;
+    width: 100%;
+}
+
+/* النص الأساسي للبيانات */
+.data-text {
+    font-size: 18px;
+    font-family: 'Roboto', sans-serif;
+    color: #E6E6E6; /* لون قريب جداً للأبيض */
+    text-shadow: 0px 0px 8px rgba(255, 255, 255, 0.5); /* تأثير التوهج الخفيف */
+}
+
+/* وقت التقاط الصورة */
+.capture-time {
+    margin-left: 25px;
+    font-size: 18px;
+    font-family: 'Roboto', sans-serif;
+    color: #E6E6E6; /* لون قريب جداً للأبيض */
+    text-shadow: 0px 0px 8px rgba(255, 255, 255, 0.5); /* تأثير التوهج الخفيف */
+}
+
+/* زر حفظ الصورة */
+.save-btn {
+    display: inline !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 0 4px !important;
+    width: auto !important;
+    margin: 0 !important;
+    margin-left: 8px !important;
+    font-size: 18px;
+    cursor: pointer;
+    transition: transform 0.2s ease;
+    vertical-align: middle;
+    border-radius: 0 !important;
+    text-shadow: none !important;
+}
+
+.save-btn:hover {
+    transform: scale(1.2);
+}
+
+.save-btn:active {
+    transform: scale(0.95);
+}
+
+/* رسالة الكاميرا غير متصلة */
+.camera-offline {
+    color: #ff4444;
+}
+
+/* الصورة الملتقطة */
+.captured-image {
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    border-radius: 10px;
+    display: block;
+}
+
+/* نص حجم الصورة */
+.image-size-text {
+    margin: 4px 0;
+}
+
+/* حاوية تفاصيل الصورة */
+.image-details-panel {
+    text-align: center;
+    padding: 8px;
+    min-height: auto;
+}
+
+/* === control panel styles (labels + selects) === */
+.ctl-label {
+  font-size: 95%;
+  font-family: 'Montserrat', sans-serif;
+  color: #E6E6E6;
+  text-shadow: 0 0 8px rgba(255,255,255,0.5);
+  letter-spacing: 0.5px;
+  margin-right: -4px;      /* مسافة بسيطة قبل select */
+  margin-left: 2px;
+}
+
+.ctl-select {
+  font-family: 'Montserrat', sans-serif;
+  font-size: 95%;
+  border-radius: 5px;
+  border: 2px outset #686f70;
+  padding: 1px 1px;
+  background: rgba(0,0,0,0.25);
+  color: #fff;
+}
+
+.ctl-select:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.3);
+  transform: scale(1.02);
+}
+
+/* Video Background */
+.bg-video {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 100%;
+    min-height: 100%;
+    width: auto;
+    height: auto;
+    z-index: -1;
+    object-fit: cover;
+    background-color: #0d1117; /* Match body background */
+}
+
+body {
+    background-image: url('../images/bg.png');
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-attachment: fixed /*!important*/;
+    width: 100%;
+    height: 100%;
+    margin: 0 auto;
+    /*height: 100vh;
+    position: fixed;*/
+    font-family:  'Roboto', 'Tajawal', 'Montserrat', sans-serif;
+    font-size: 14px;
+    background-color: #0d1117; /* Dark hacker-style background */
+    padding: 0;
+    color: #ffffff; /* White text for readability */
+    overflow-x: auto; /* السماح بالتمرير إذا كانت الشاشة أصغر */
+    max-width: 95%;
+    min-height: 100vh;
+    min-height: -webkit-fill-available;
+}
+
+.h1 { 
+    color: white;
+    font-size: 14px;
+    transition: 0.5s;
+}
+
+.h1:hover{
+    -webkit-text-stroke: 1px #ffffff;
+    color: transparent;
+}
+
+.a {
+    color: white;
+    font-size: 16px;
+    text-shadow: 1px 1px 5px rgba(0,0,0,0.5); 
+}
+
+.a:hover {
+    font-size: 16px;
+    text-shadow: 1px 1px 5px rgba(0,0,0,0.8);
+}
+.a:active {
+    text-shadow: 2px 2px 5px rgba(0,0,0,0.5); 
+}
+
+.b { font-size: 14px; /*الكلام الي عنده نقطه */
+    font-family: 'Roboto', sans-serif;
+    color: #E6E6E6; /* لون قريب جداً للأبيض */
+    text-shadow: 0px 0px 8px rgba(255, 255, 255, 0.5); /* تأثير التوهج الخفيف */
+    letter-spacing:1px;
+    text-align:center; 
+}
+
+.p {
+    color: white;
+    font-size: 16px;
+    font-family: 'Roboto', sans-serif;
+    padding: 4px;
+    margin: 0 auto;
+}
+
+.log {
+  font-size: 14px; /* حجم الخط */
+  line-height: 200%; /* الارتفاع بين الأسطر */
+  color: rgba(250, 250, 250, 0.65); /* لون النص */
+  text-shadow: 1px 1px 3px rgba(0,0,0,0.2);
+  text-align: center;
+}
+
+/* ========================================
+   BUTTON STYLES & ANIMATIONS
+   ======================================== */
+
+/* Button interactions */
+.glass-red-button {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+}
+
+.glass-red-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(255, 0, 0, 0.3);
+}
+
+.glass-red-button:active {
+    transform: translateY(0);
+    transition: all 0.1s ease;
+}
+
+.glass-red-button.success-state {
+    background: linear-gradient(45deg, #00ff00, #32cd32);
+    transform: scale(1.05);
+}
+
+.glass-red-button.error-state {
+    background: linear-gradient(45deg, #ff4444, #cc0000);
+    animation: errorShake 0.5s ease-in-out;
+}
+
+/* Glass button enhancement */
+.glass-button {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.glass-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(8px);
+}
+
+.glass-button:active {
+    transform: scale(0.98);
+    transition: all 0.1s ease;
+}
+
+/* ========================================
+   LOADING STATES & ANIMATIONS
+   ======================================== */
+
+/* Enhanced blinking animation */
+@keyframes blinking {
+    0% { opacity: 1; }
+    50% { opacity: 0.6; }
+    100% { opacity: 1; }
+}
+
+@keyframes blink {
+    0% {
+        opacity: 1;
+        box-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
+    }
+    50% {
+        opacity: 0.7;
+        box-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
+    }
+    100% {
+        opacity: 1;
+        box-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
+    }
+}
+
+.blinking {
+    animation: blinking 1s infinite;
+}
+
+/* Smooth transitions for all interactive elements */
+select, input, button {
+    transition: all 0.2s ease;
+}
+
+select:focus, input:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.3);
+    transform: scale(1.02);
+}
+
+
+/*.glass-panel:hover {
+    backdrop-filter: blur(12px);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(255, 255, 255, 0.1);
+}*/
+
+.glass-button-container {
+    display: inline-block;
+    position: relative; /* أو أي أنماط أخرى تحتاجها */
+}
+
+.glass-red-button {
+    align-items: center;
+    padding: 16px 22px;
+    font-family: 'Montserrat', sans-serif;
+    font-weight: bold;
+    letter-spacing: 2px;
+    font-size: 16px;
+    color: white;
+    border-radius: 18px;
+    background-color: rgba(255, 0, 0, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
+    cursor: pointer;
+    text-transform: uppercase;
+    margin: 5px 0;
+    transition: background-color 0.3s;
+    margin-bottom: 2px; /* مسافة أسفل الكبتشر */
+}
+
+.glass-red-button:hover {
+    background-color: rgba(255, 0, 0, 0.7);
+}
+
+.capture-note {
+    font-size: 10px; /*الكلام الي عنده نقطه */
+    font-family: 'Roboto', sans-serif;
+    color: #E6E6E6; /* لون قريب جداً للأبيض */
+    text-shadow: 0px 0px 8px rgba(255, 255, 255, 0.5); /* تأثير التوهج الخفيف */
+    letter-spacing:1px;
+    text-align:center; 
+    align-items: center;
+    margin-top: -1px; /* قلل القيمة لتقريب النص من الزر */
+    margin-bottom: -2px
+}
+
+#id1 {
+    margin: 18px auto;
+    max-width: 830px;
+    min-width: 730px;
+    box-sizing: border-box;
+}
+
+.glass-panel {
+    transition: all 0.3s ease;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    backdrop-filter: blur(5px);
+    -webkit-backdrop-filter: blur(20px);
+    padding: 5px 15px; /* 5px للأعلى والأسفل، 15px لليمين واليسار */
+    margin: 18px auto;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #fff;
+    max-width: 830px;
+    min-width: 730px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 5px;
+    box-sizing: border-box;
+}
+
+.status-container {
+    display: flex;
+    justify-content: flex-end;
+    align-items: baseline;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+.status-indicator {
+    font-size: 18px;
+    display: inline-block; /* Makes the indicator wrap content */
+    padding: 5px 10px;
+    border-radius: 5px;
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(20px);
+    margin: 5px 0;
+    text-align: center;
+    animation: blink 1s infinite;
+}
+
+.status-indicator.online {
+    font-size: 18px;
+    background: rgba(76, 175, 80, 0.3);
+    color: #4CAF50;
+    border: 1px solid #4CAF50;
+    margin-right: 20px;
+    animation: blink 1s infinite;
+}
+
+.status-indicator.offline {
+    font-size: 18px;
+    background: rgba(244, 67, 54, 0.3);
+    color: #f44336;
+    border: 1px solid #f44336;
+    margin-right: 20px;
+    animation: blink 1s infinite;
+}
+
+.glass-button { /* دقم اعادة التشغيل و التطفيه */
+   text-decoration: none;
+   display: inline-block;
+   padding: 10px;
+   font-family: 'Montserrat', sans-serif;
+   font-weight: bold;
+   letter-spacing: 2px;
+   font-size: 18px;
+   backdrop-filter: blur(30px);
+   -webkit-backdrop-filter: blur(20px);
+   text-shadow: 1px 1px 3px rgba(0,0,0,0.2);
+   border-radius: 20px;
+   background-color: rgba(255,255,255,0.1);
+   border: 1px solid rgba(255,255,255,0.1);
+   max-width: 150px;
+   min-width: 150px;
+   width: 15%;
+   text-align: center;
+   color: rgba(193, 43, 43, 0.8);
+   cursor: pointer;
+   text-transform: uppercase;
+   margin: 5px 0;
+   margin-top: 2px; /* Adds bottom margin to server buttons */
+   margin-left: 2px; /* Adds left margin to server buttons */
+   margin-bottom: -2px; /* Adds bottom margin to server buttons */
+}
+
+.glass-button:hover {
+   background-color: rgba(255,255,255,0.2);
+}
+
+.server-buttons-container {
+    display: flex;
+    justify-content: center; /* يضع الأزرار في وسط الحاوية */
+    align-items: end; /* Aligns items to the bottom */
+    gap: 5px; /* يضيف مسافة بين الأزرار */
+}
+
+.server-button {
+   display: inline-block;
+   padding: 10px;
+   font-family: 'Montserrat', sans-serif;
+   font-weight: bold;
+   letter-spacing: 2px;
+   font-size: 16px;
+   text-shadow: 1px 1px 3px rgba(0,0,0,0.2);
+   border-radius: 20px;
+   background-color: rgba(255,255,255,0.1);
+   border: 1px solid rgba(255,255,255,0.1);
+   backdrop-filter: blur(30px);
+   -webkit-backdrop-filter: blur(20px);
+   width: 15%;
+   text-align: center;
+   color: white;
+   cursor: pointer;
+   text-transform: uppercase;
+   margin: 0 10px; /* Space between buttons */
+   text-decoration: none; /* Remove underline */
+   margin-top: 2px; /* Adds bottom margin to server buttons */
+   margin-left: 2px; /* Adds left margin to server buttons */
+   margin-bottom: -2px; /* Adds bottom margin to server buttons */
+}
+.server-button:hover {
+   background-color: rgba(255,255,255,0.2);
+}
+
+.emoji-button-container {
+    position: fixed;
+    top: 30px;
+    right: 60px;
+    z-index: 100;
+}
+
+.emoji-button {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 65px;
+    height: 65px;
+    border-radius: 70%;
+    font-size: 40px;
+    cursor: pointer;
+    background-color: rgba(255,255,255,0.1);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.3);
+}
+
+.emoji-button:hover {
+    background-color: rgba(255,255,255,0.2);
+}
+
+button {
+    text-decoration: none;
+    cursor: pointer;
+    font-family: 'Montserrat', sans-serif;
+    background: rgba(0,0,0,0.25);
+    border-radius: 20px;
+    border: 2px outset #686f70;
+    color: white;
+    width:95%; 
+    padding: 10px 10px; /* FIX: add missing px */
+    text-align: center;
+    display: inline-block;
+    font-size: 16px;
+    text-shadow: 1px 1px black;
+    margin: 5px 0;
+}
+
+/* FIX: target the actual <button> element, not class .button */
+button:hover {
+    background: rgba(0,0,0,0.35);
+    box-shadow: 0px 3px 3px 0px rgba(0,0,0,0.24);
+}
+
+button:active {
+    background: rgba(0,0,0,0.45);
+}
+
+/* FIX: style both input and select */
+input, select {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 14px;
+    border-radius: 6px;
+    border: 2px outset #686f70;
+    padding-left: 10px;
+}
+
+/* Removed unused .pulse_me class */
+@keyframes pulse-green {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(0, 255, 0, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(0, 255, 0, 1);
+  }
+}
+
+@keyframes pulse-red {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(255, 0, 0, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(255, 0, 0, 1);
+  }
+}
+
+/* Add spinner for live streaming */
+.spinner {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto;
+    border: 4px solid rgba(255, 255, 255, 0.2);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 1s ease-in-out infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Optional: Add a subtle animation */
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4); }
+  70% { box-shadow: 0 0 0 10px rgba(255, 255, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+}
+
+/* ========================================
+   MODE.PHP STYLES - MOVED FROM INLINE
+   ======================================== */
+
+
+/* Simple Three-Color Status System */
+.status-indicator.online { 
+    color: #00ff00; 
+    animation: pulse 1s infinite; 
+}
+
+.status-indicator.offline { 
+    color: #ff0000; 
+    animation: blink 1s infinite; 
+}
+.loading-overlay{
+  position: absolute;
+  inset: 0;               /* top/right/bottom/left: 0 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(0,0,0,0.45);
+  border-radius: 10px;    /* طابق زوايا الصورة */
+  z-index: 5;
+}
+
+/* إصلاح مشكلة glass داخل glass للآيباد - إضافة جديدة */
+.glass-panel .glass-panel,
+.glass-panel .status-indicator,
+.glass-panel .server-button,
+.glass-panel .glass-button {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
+/* Touch optimization - إضافة جديدة */
+button, select, .glass-button, .glass-red-button, .emoji-button {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+}

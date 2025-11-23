@@ -1,0 +1,995 @@
+#!/usr/bin/env bash
+set -uo pipefail  # Removed -e for monitoring resilience
+IFS=$'\n\t'
+
+#===============================================================================
+# Network Monitor - Advanced WiFi Management
+#
+# Intelligent network monitoring and automatic failover system
+# Ensures continuous internet connectivity with <30s maximum downtime
+#
+# @category  System
+# @package   NetworkMonitor
+# @author    Net Storm
+# @license   Proprietary
+# @version   1.0.0
+# @standards Pure Bash Bible, Google Style Guide, Clean Code, OWASP
+#===============================================================================
+
+#===============================================================================
+# DEVICE CONFIGURATION
+#===============================================================================
+readonly DEVICE_ID="${DEVICE_ID:-cam1-V1}"
+readonly BASE_URL="http://XX.com/${DEVICE_ID}"
+readonly NETMON_DIR="/tmp/netmon"
+readonly DEBUG_MODE="${DEBUG:-no}"  # Set DEBUG=yes for verbose output
+
+#===============================================================================
+# CRITICAL THRESHOLDS
+#===============================================================================
+readonly MAX_OFFLINE_SECONDS=30          # Maximum allowed offline time
+readonly QUICK_CHECK_INTERVAL=5          # Internet check every 5s
+readonly NORMAL_CHECK_INTERVAL=15        # Stable mode: check every 15s
+readonly FAILURE_THRESHOLD=2             # Failed checks before recovery
+readonly EXCELLENT_SCORE_MIN=80          # Score above which we rarely switch
+
+# Upload Speed Thresholds (KB/s)
+readonly SPEED_CRITICAL=50               # Below this: 20% improvement needed
+readonly SPEED_NEEDS_IMPROVEMENT=80      # Below this: 50% improvement needed
+readonly SPEED_NORMAL=120                # Below this: 100% improvement needed
+readonly SPEED_EXCELLENT=120             # Above this: 150% improvement needed
+
+# Time Decay
+readonly MEASUREMENT_VALIDITY=1800       # 30 minutes
+readonly RETEST_INTERVAL=900             # Re-test every 15 minutes
+
+# Network History
+readonly MAX_HISTORY_PER_NETWORK=10      # Track last 10 uploads per network
+
+#===============================================================================
+# TIMEOUTS (Optimized for speed)
+#===============================================================================
+readonly PING_TIMEOUT=2
+readonly CURL_TIMEOUT=3
+readonly SCAN_TIMEOUT=10
+readonly CONNECT_TIMEOUT=10
+
+#===============================================================================
+# SCORING WEIGHTS (AWACS Algorithm)
+#===============================================================================
+readonly WEIGHT_SPEED=50
+readonly WEIGHT_SIGNAL=30
+readonly WEIGHT_PRIORITY=15
+readonly CURRENT_BONUS=25
+
+#===============================================================================
+# STATE VARIABLES
+#===============================================================================
+CURRENT_SSID=""
+LAST_INTERNET_CHECK=0
+CONSECUTIVE_FAILURES=0
+CHECK_INTERVAL=$NORMAL_CHECK_INTERVAL
+RECOVERY_MODE=false
+
+#===============================================================================
+# EXIT CODES
+#===============================================================================
+readonly EXIT_SUCCESS=0
+readonly EXIT_NO_WIFI=1
+readonly EXIT_NO_NETWORKS=2
+readonly EXIT_TIMEOUT=3
+
+#===============================================================================
+# UTILITY FUNCTIONS
+#===============================================================================
+
+# Logging function with local + remote support
+# @param $1 string Level (INFO|WARN|ERROR|DEBUG)
+# @param $2 string Message
+log() {
+    local level=$1
+    local msg=$2
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    # Skip DEBUG if not in debug mode
+    [[ $level == "DEBUG" && $DEBUG_MODE != "yes" ]] && return 0
+
+    # Console output
+    echo "[$ts] [$level] $msg" >&2
+
+    # Remote logging (async, non-blocking)
+    if [[ $level != "DEBUG" ]]; then
+        curl -sf --data "file=log/netmon.log&data=[$level] $msg, $(TZ=Asia/Kuwait date '+%d/%m/%Y %I:%M:%S %p')." \
+            "${BASE_URL}/storage.php" -m 3 >/dev/null 2>&1 &
+    fi
+}
+
+# Pure Bash byte size converter
+# @param $1 int Bytes
+# @return string Human readable size
+size_conv() {
+    local bytes=$1
+    if ((bytes < 1024)); then
+        echo "${bytes}B"
+    elif ((bytes < 1048576)); then
+        echo "$((bytes / 1024)).$((bytes % 1024 * 10 / 1024))KB"
+    elif ((bytes < 1073741824)); then
+        echo "$((bytes / 1048576)).$((bytes % 1048576 * 10 / 1048576))MB"
+    else
+        echo "$((bytes / 1073741824)).$((bytes % 1073741824 * 10 / 1073741824))GB"
+    fi
+}
+
+# Pure Bash float comparison
+# @param $1 float Number 1
+# @param $2 string Operator (>|<|==)
+# @param $3 float Number 2
+# @return int 0 if true, 1 if false
+compare() {
+    local n1=${1%.*} d1=${1#*.}
+    local n2=${3%.*} d2=${3#*.}
+
+    [[ $n1 == "$1" ]] && d1=0
+    [[ $n2 == "$3" ]] && d2=0
+
+    local v1=$((n1 * 100 + d1))
+    local v2=$((n2 * 100 + d2))
+
+    case $2 in
+        ">")  ((v1 > v2)) ;;
+        "<")  ((v1 < v2)) ;;
+        "==") ((v1 == v2)) ;;
+        ">=") ((v1 >= v2)) ;;
+        "<=") ((v1 <= v2)) ;;
+        *) return 2 ;;
+    esac
+}
+
+# Check WiFi interface availability
+check_wifi() {
+    if ! command -v iwconfig &>/dev/null; then
+        log "ERROR" "iwconfig not found - install wireless-tools"
+        return 1
+    fi
+
+    if ! iwconfig wlan0 &>/dev/null; then
+        log "ERROR" "wlan0 interface not found"
+        return 1
+    fi
+
+    log "INFO" "WiFi interface wlan0 detected"
+    return 0
+}
+
+# Initialize monitoring directories
+init_dirs() {
+    if ! mkdir -p "$NETMON_DIR" 2>/dev/null; then
+        log "WARN" "Failed to create $NETMON_DIR, using /tmp fallback"
+        NETMON_DIR="/tmp/netmon_fallback"
+        mkdir -p "$NETMON_DIR" || {
+            log "ERROR" "Cannot create monitoring directory"
+            return 1
+        }
+    fi
+
+    chmod 777 "$NETMON_DIR" 2>/dev/null || true
+    log "INFO" "Monitoring directory: $NETMON_DIR"
+
+    return 0
+}
+
+# Update status files for web display
+# @param $1 string SSID
+# @param $2 string Signal (dBm)
+# @param $3 string Speed (KB/s)
+# @param $4 string Latency (ms)
+# @param $5 string Quality (Excellent|Good|Fair|Poor)
+# @param $6 string State (Connected|Switching|Failed)
+update_status() {
+    local ssid=$1 signal=$2 speed=$3 latency=$4 quality=$5 state=$6
+
+    # Main status file
+    echo "${ssid}|${signal}|${speed}|${latency}|${quality}|${state}" > "${NETMON_DIR}/status.tmp" 2>/dev/null || true
+
+    # Upload to server (async)
+    curl -sf --data "file=tmp/netmon/status.tmp&data=${ssid}|${signal}|${speed}|${latency}|${quality}|${state}" \
+        "${BASE_URL}/storage.php" -m 3 >/dev/null 2>&1 &
+}
+
+# Log event (switching, failure, etc)
+# @param $1 string Event type
+# @param $2 string Details
+log_event() {
+    local event=$1
+    local details=$2
+
+    log "INFO" "${event}: ${details}"
+}
+
+#===============================================================================
+# SMART SWITCHING FUNCTIONS
+#===============================================================================
+
+# Get real upload speed from tmp file (written by core scripts)
+# @return string Speed in KB/s or empty
+get_upload_stats() {
+    local stats_file="/tmp/upload_stats.tmp"
+    [[ ! -f $stats_file ]] && return 1
+
+    local content
+    content="$(cat "$stats_file" 2>/dev/null)" || return 1
+
+    # Format: speed_kbps|duration_ms|size_bytes|timestamp
+    local speed duration size timestamp
+    IFS='|' read -r speed duration size timestamp <<< "$content"
+
+    # Validate timestamp (not older than 5 minutes)
+    local now
+    now="$(date +%s)"
+    local age=$((now - timestamp))
+    ((age > 300)) && return 1  # Too old
+
+    echo "$speed"
+}
+
+# Get camera state (check if busy)
+# @return string State (idle|uploading|capturing) or empty
+get_camera_state() {
+    local state_file="/tmp/camera_state.tmp"
+    [[ ! -f $state_file ]] && echo "idle" && return 0
+
+    local state
+    state="$(cat "$state_file" 2>/dev/null)" || { echo "idle"; return 0; }
+    echo "$state"
+}
+
+# Check if camera is busy (uploading or capturing)
+# @return int 0 if busy
+is_camera_busy() {
+    local state
+    state="$(get_camera_state)"
+    [[ $state == "uploading" || $state == "capturing" ]] && return 0
+    return 1
+}
+
+# Get adaptive threshold based on current speed
+# @param $1 int Current speed (KB/s)
+# @return int Required improvement percentage
+get_adaptive_threshold() {
+    local current_speed=$1
+
+    if ((current_speed < SPEED_CRITICAL)); then
+        echo "20"  # Critical: 20% improvement needed
+    elif ((current_speed < SPEED_NEEDS_IMPROVEMENT)); then
+        echo "50"  # Needs improvement: 50%
+    elif ((current_speed < SPEED_NORMAL)); then
+        echo "100" # Normal: 100%
+    else
+        echo "150" # Excellent: 150% (very high bar)
+    fi
+}
+
+# Save network history
+# @param $1 string SSID
+# @param $2 int Speed (KB/s)
+# @param $3 int Timestamp
+save_network_history() {
+    local ssid=$1
+    local speed=$2
+    local timestamp=${3:-$(date +%s)}
+
+    local history_file="${NETMON_DIR}/history_${ssid}.dat"
+
+    # Append new measurement
+    echo "${speed}|${timestamp}" >> "$history_file"
+
+    # Keep only last MAX_HISTORY_PER_NETWORK entries
+    local temp_file="${history_file}.tmp"
+    tail -n "$MAX_HISTORY_PER_NETWORK" "$history_file" > "$temp_file" 2>/dev/null && mv "$temp_file" "$history_file"
+}
+
+# Get network average speed with time decay
+# @param $1 string SSID
+# @return int Average speed or 0
+get_network_average() {
+    local ssid=$1
+    local history_file="${NETMON_DIR}/history_${ssid}.dat"
+
+    [[ ! -f $history_file ]] && echo "0" && return 0
+
+    local now
+    now="$(date +%s)"
+    local total_speed=0
+    local count=0
+
+    while IFS='|' read -r speed timestamp; do
+        local age=$((now - timestamp))
+
+        # Skip measurements older than MEASUREMENT_VALIDITY (30 min)
+        ((age > MEASUREMENT_VALIDITY)) && continue
+
+        ((total_speed += speed))
+        ((count++))
+    done < "$history_file"
+
+    ((count == 0)) && echo "0" && return 0
+
+    local avg=$((total_speed / count))
+    echo "$avg"
+}
+
+# Check if network needs retesting
+# @param $1 string SSID
+# @return int 0 if needs retest
+needs_retest() {
+    local ssid=$1
+    local history_file="${NETMON_DIR}/history_${ssid}.dat"
+
+    [[ ! -f $history_file ]] && return 0  # No history = needs test
+
+    # Get last measurement timestamp
+    local last_line
+    last_line="$(tail -n 1 "$history_file" 2>/dev/null)" || return 0
+
+    local last_speed last_timestamp
+    IFS='|' read -r last_speed last_timestamp <<< "$last_line"
+
+    local now
+    now="$(date +%s)"
+    local age=$((now - last_timestamp))
+
+    # Retest if older than RETEST_INTERVAL (15 min)
+    ((age > RETEST_INTERVAL)) && return 0
+
+    return 1
+}
+
+#===============================================================================
+# NETWORK INFORMATION FUNCTIONS
+#===============================================================================
+
+# Get current connected SSID
+# @return string SSID or empty
+get_current_ssid() {
+    local ssid=""
+    if command -v iwgetid &>/dev/null; then
+        ssid="$(iwgetid -r 2>/dev/null)" || ssid=""
+    else
+        # Fallback: parse iwconfig
+        local iwconfig_out
+        iwconfig_out="$(iwconfig wlan0 2>/dev/null)" || return 0
+        [[ $iwconfig_out =~ ESSID:\"([^\"]+)\" ]] && ssid="${BASH_REMATCH[1]}"
+    fi
+    echo "$ssid"
+}
+
+# Get signal strength for current connection
+# @return string Signal in dBm or empty
+get_signal() {
+    local iwconfig_out signal
+    iwconfig_out="$(iwconfig wlan0 2>/dev/null)" || return 1
+
+    [[ $iwconfig_out =~ Signal\ level=(-?[0-9]+) ]] && signal="${BASH_REMATCH[1]}" || return 1
+    echo "$signal"
+}
+
+# Convert signal dBm to quality rating
+# @param $1 string Signal in dBm
+# @return string Quality (Excellent|Good|Fair|Poor)
+signal_quality() {
+    local signal=${1#-}
+
+    if ((signal <= 50)); then
+        echo "Excellent"
+    elif ((signal <= 60)); then
+        echo "Good"
+    elif ((signal <= 70)); then
+        echo "Fair"
+    else
+        echo "Poor"
+    fi
+}
+
+# Get WiFi channel
+# @return string Channel number
+get_channel() {
+    local iwconfig_out
+    iwconfig_out="$(iwconfig wlan0 2>/dev/null)" || return 1
+
+    if [[ $iwconfig_out =~ Frequency:.*Channel\ ([0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        echo "N/A"
+    fi
+}
+
+#===============================================================================
+# INTERNET CONNECTIVITY TESTS
+#===============================================================================
+
+# Fast ping test (primary check)
+# @return int 0 if success
+quick_ping() {
+    timeout "$PING_TIMEOUT" ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1
+}
+
+# HTTP portal check (secondary)
+# @return int 0 if success
+portal_check() {
+    timeout "$CURL_TIMEOUT" curl -sf --max-time 2 "http://detectportal.firefox.com/success.txt" >/dev/null 2>&1
+}
+
+# DNS resolution test (tertiary)
+# @return int 0 if success
+dns_check() {
+    timeout 2 nslookup google.com >/dev/null 2>&1
+}
+
+# Comprehensive internet check
+# @return int 0 if online
+check_internet() {
+    quick_ping && return 0
+    portal_check && return 0
+    dns_check && return 0
+    return 1
+}
+
+# Measure latency to server
+# @return string Latency in ms or "N/A"
+measure_latency() {
+    local ping_out
+    ping_out="$(ping -c 1 -W "$PING_TIMEOUT" netstorm.site 2>/dev/null)" || { echo "N/A"; return 1; }
+
+    if [[ $ping_out =~ time=([0-9.]+) ]]; then
+        local ms=${BASH_REMATCH[1]%.*}
+        echo "$ms"
+    else
+        echo "N/A"
+    fi
+}
+
+# Measure upload speed (REAL from core or synthetic fallback)
+# @param $1 string SSID (optional - for history tracking)
+# @return string Speed in KB/s
+measure_speed() {
+    local ssid=${1:-""}
+
+    # First: Try to get REAL upload speed from tmp file
+    local real_speed
+    real_speed="$(get_upload_stats)" && [[ -n $real_speed && $real_speed != "0" ]] && {
+        log "DEBUG" "Using REAL upload speed: ${real_speed} KB/s"
+
+        # Save to history if SSID provided
+        [[ -n $ssid ]] && save_network_history "$ssid" "$real_speed" "$(date +%s)"
+
+        echo "$real_speed"
+        return 0
+    }
+
+    # Fallback: Synthetic speed test (only if no real data)
+    log "DEBUG" "No real upload data - using synthetic test"
+    local speed_bytes
+    speed_bytes="$(curl -sf -w "%{speed_download}" -o /dev/null --connect-timeout 2 --max-time 5 \
+        "http://speedtest.tele2.net/1MB.zip" 2>/dev/null)" || { echo "0"; return 1; }
+
+    if [[ $speed_bytes =~ ^[0-9]+$ ]]; then
+        local speed_kb=$((speed_bytes / 1024))
+        echo "$speed_kb"
+    else
+        echo "0"
+    fi
+}
+
+#===============================================================================
+# DNS RECOVERY
+#===============================================================================
+
+# Fix DNS issues (common problem)
+fix_dns() {
+    log "WARN" "Attempting DNS fix"
+
+    # Backup current resolv.conf
+    [[ -f /etc/resolv.conf ]] && cp /etc/resolv.conf /tmp/resolv.conf.bak 2>/dev/null
+
+    # Set reliable DNS servers
+    {
+        echo "nameserver 8.8.8.8"
+        echo "nameserver 1.1.1.1"
+        echo "nameserver 208.67.222.222"
+    } | sudo tee /etc/resolv.conf >/dev/null 2>&1
+
+    sleep 2
+
+    if dns_check; then
+        log "INFO" "DNS fix successful"
+        return 0
+    else
+        [[ -f /tmp/resolv.conf.bak ]] && sudo cp /tmp/resolv.conf.bak /etc/resolv.conf 2>/dev/null
+        log "ERROR" "DNS fix failed"
+        return 1
+    fi
+}
+
+#===============================================================================
+# NETWORK SCANNING & SCORING
+#===============================================================================
+
+# Scan available networks
+# @return string Network list (SSID:Signal)
+scan_networks() {
+    local scan_out networks=()
+
+    # Trigger scan
+    sudo iwlist wlan0 scan 2>/dev/null || return 1
+
+    # Parse results (Pure Bash)
+    scan_out="$(sudo iwlist wlan0 scan 2>/dev/null)" || return 1
+
+    local current_ssid="" current_signal=""
+    while IFS= read -r line; do
+        if [[ $line =~ ESSID:\"([^\"]+)\" ]]; then
+            current_ssid="${BASH_REMATCH[1]}"
+        elif [[ $line =~ Signal\ level=(-?[0-9]+) ]]; then
+            current_signal="${BASH_REMATCH[1]}"
+
+            # Only add if SSID is not empty and doesn't contain special chars
+            if [[ -n $current_ssid && -n $current_signal && $current_ssid != *":"* ]]; then
+                networks+=("${current_ssid}:${current_signal}")
+                current_ssid=""
+                current_signal=""
+            else
+                # Reset for next network
+                current_ssid=""
+                current_signal=""
+            fi
+        fi
+    done <<< "$scan_out"
+
+    # Return unique networks
+    printf '%s\n' "${networks[@]}" | sort -u
+}
+
+# Calculate network score (AWACS algorithm)
+# @param $1 string Signal (dBm)
+# @param $2 string Speed (KB/s)
+# @param $3 int Priority (1-10, default 5)
+# @param $4 bool Is current network (0|1)
+# @return string Score (0-100)
+calculate_score() {
+    local signal=${1#-}
+    local speed=$2
+    local priority=${3:-5}
+    local is_current=${4:-0}
+
+    # Signal score (0-100)
+    local signal_score=0
+    if ((signal < 50)); then
+        signal_score=100
+    elif ((signal < 85)); then
+        signal_score=$((100 - signal))
+    else
+        echo "0"
+        return
+    fi
+
+    # Speed score (0-100)
+    local speed_score=0
+    if ((speed >= 1000)); then
+        speed_score=100
+    else
+        speed_score=$((speed / 10))
+    fi
+
+    # Weighted total
+    local total=$(( (speed_score * WEIGHT_SPEED / 100) + (signal_score * WEIGHT_SIGNAL / 100) + (priority * WEIGHT_PRIORITY / 10) ))
+
+    # Current network bonus
+    ((is_current == 1)) && total=$((total + CURRENT_BONUS))
+
+    # Cap at 100
+    ((total > 100)) && total=100
+
+    echo "$total"
+}
+
+#===============================================================================
+# NETWORK SWITCHING LOGIC
+#===============================================================================
+
+# Check if we should switch to a better network (SMART ADAPTIVE)
+# @param $1 int Current speed (KB/s)
+# @param $2 int Best available speed (KB/s)
+# @param $3 bool Has internet (0|1)
+# @return int 0 if should switch
+should_switch() {
+    local current_speed=$1
+    local best_speed=$2
+    local has_internet=$3
+
+    # Check if camera is busy
+    is_camera_busy && {
+        log "DEBUG" "Camera busy - postponing network switch"
+        return 1
+    }
+
+    # No current connection - always switch
+    ((current_speed == 0)) && return 0
+
+    # Current network has no internet - switch if new is better
+    ((has_internet == 0)) && ((best_speed > current_speed)) && return 0
+
+    # Validate best_speed is numeric
+    [[ ! $best_speed =~ ^[0-9]+$ ]] && best_speed=0
+
+    # Get adaptive threshold based on current speed
+    local required_improvement
+    required_improvement="$(get_adaptive_threshold "$current_speed")"
+    [[ ! $required_improvement =~ ^[0-9]+$ ]] && required_improvement=100
+
+    log "DEBUG" "Current: ${current_speed} KB/s | Best: ${best_speed} KB/s | Required: ${required_improvement}%"
+
+    # Calculate actual improvement percentage
+    local improvement=$(( (best_speed - current_speed) * 100 / current_speed ))
+
+    log "DEBUG" "Improvement: ${improvement}% (need ${required_improvement}%)"
+
+    # Switch if improvement meets adaptive threshold
+    ((improvement >= required_improvement)) && {
+        log "INFO" "Switch justified: ${improvement}% >= ${required_improvement}%"
+        return 0
+    }
+
+    return 1
+}
+
+# Connect to a network
+# @param $1 string SSID
+# @return int 0 if success
+connect_network() {
+    local ssid=$1
+
+    log "INFO" "Connecting to: $ssid"
+    log_event "Switching" "Attempting connection to $ssid"
+
+    # Use nmcli (most reliable)
+    if command -v nmcli &>/dev/null; then
+        if timeout "$CONNECT_TIMEOUT" nmcli device wifi connect "$ssid" 2>/dev/null; then
+            sleep 3
+            if [[ "$(get_current_ssid)" == "$ssid" ]]; then
+                log "INFO" "Connected successfully to $ssid"
+                return 0
+            fi
+        fi
+    fi
+
+    # Fallback: wpa_cli
+    local network_id
+    network_id="$(wpa_cli add_network 2>/dev/null | grep -o '[0-9]*')" || return 1
+    wpa_cli set_network "$network_id" ssid "\"$ssid\"" >/dev/null 2>&1 || return 1
+    wpa_cli set_network "$network_id" key_mgmt NONE >/dev/null 2>&1
+    wpa_cli enable_network "$network_id" >/dev/null 2>&1 || return 1
+    wpa_cli save_config >/dev/null 2>&1
+
+    sleep 5
+
+    [[ "$(get_current_ssid)" == "$ssid" ]] && return 0
+    return 1
+}
+
+# Smart network scanning and switching
+# Uses historical data + real upload speeds
+# @return int 0 if switched or no switch needed
+smart_scan_and_switch() {
+    log "DEBUG" "=== Smart Scan & Switch Analysis ==="
+
+    # Don't switch if camera is busy
+    is_camera_busy && {
+        log "DEBUG" "Camera busy - skipping scan"
+        return 1
+    }
+
+    # Get current network info
+    local current_ssid
+    current_ssid="$(get_current_ssid)"
+
+    local current_speed=0
+    if [[ -n $current_ssid ]]; then
+        # Try to get real speed from history
+        current_speed="$(get_network_average "$current_ssid")"
+
+        # Validate current_speed is numeric
+        [[ ! $current_speed =~ ^[0-9]+$ ]] && current_speed=0
+
+        # If no history, measure now
+        if ((current_speed == 0)); then
+            current_speed="$(measure_speed "$current_ssid")"
+            [[ ! $current_speed =~ ^[0-9]+$ ]] && current_speed=0
+        fi
+
+        log "DEBUG" "Current network: $current_ssid @ ${current_speed} KB/s"
+    fi
+
+    # Scan available networks
+    local networks
+    networks="$(scan_networks)" || {
+        log "WARN" "Network scan failed"
+        return 1
+    }
+
+    # Find best alternative network
+    local best_ssid="" best_speed=0
+
+    while IFS=: read -r ssid signal; do
+        # Skip invalid SSID (empty, contains only special chars, or looks like MAC)
+        [[ -z $ssid ]] && continue
+        [[ $ssid =~ ^[0-9A-F]{2}$ ]] && continue  # Skip if looks like first part of MAC
+
+        # Skip current network
+        [[ $ssid == "$current_ssid" ]] && continue
+
+        # Validate signal is numeric
+        [[ ! $signal =~ ^-?[0-9]+$ ]] && continue
+
+        # Skip weak signals (below -80 dBm)
+        local signal_num=${signal#-}
+        ((signal_num > 80)) && continue
+
+        # Get historical average for this network
+        local avg_speed
+        avg_speed="$(get_network_average "$ssid")"
+
+        # Validate avg_speed is numeric
+        [[ ! $avg_speed =~ ^[0-9]+$ ]] && avg_speed=0
+
+        log "DEBUG" "Network: $ssid | Signal: $signal | Avg Speed: ${avg_speed} KB/s"
+
+        # Update best if this is better
+        ((avg_speed > best_speed)) && {
+            best_ssid="$ssid"
+            best_speed="$avg_speed"
+        }
+    done <<< "$networks"
+
+    # Check if we found a better network
+    if [[ -z $best_ssid ]]; then
+        log "DEBUG" "No better network found"
+        return 0
+    fi
+
+    log "INFO" "Best alternative: $best_ssid @ ${best_speed} KB/s"
+
+    # Check internet status
+    local has_internet=1
+    check_internet || has_internet=0
+
+    # Decide if we should switch
+    if should_switch "$current_speed" "$best_speed" "$has_internet"; then
+        log "INFO" "Switching from ${current_ssid:-none} (${current_speed} KB/s) to $best_ssid (${best_speed} KB/s)"
+
+        # Execute switch
+        if connect_network "$best_ssid"; then
+            log_event "Switched" "Successfully switched to $best_ssid"
+            return 0
+        else
+            log "ERROR" "Failed to switch to $best_ssid"
+            log_event "Failed" "Switch to $best_ssid failed"
+            return 1
+        fi
+    else
+        log "DEBUG" "No switch needed - current network acceptable"
+        return 0
+    fi
+}
+
+#===============================================================================
+# RECOVERY SYSTEM (30-Second Guarantee)
+#===============================================================================
+
+# Progressive recovery with strict time limits
+# Phase 1 (0-5s):   Quick fixes
+# Phase 2 (5-10s):  Network scan
+# Phase 3 (10-20s): Smart switching
+# Phase 4 (20-25s): Aggressive fallback
+# Phase 5 (25-30s): Nuclear option
+recovery_mode_engage() {
+    local start_time
+    start_time="$(date +%s)"
+    RECOVERY_MODE=true
+
+    log "WARN" "RECOVERY MODE ENGAGED - Max 30s"
+    log_event "Recovery" "Internet lost - initiating recovery"
+
+    # Phase 1: Quick fixes (5s)
+    log "INFO" "Phase 1: Quick fixes"
+    fix_dns && check_internet && {
+        recovery_success "DNS fix"
+        return 0
+    }
+
+    sudo dhclient -r wlan0 >/dev/null 2>&1
+    sudo dhclient wlan0 >/dev/null 2>&1
+    sleep 2
+    check_internet && {
+        recovery_success "DHCP renewal"
+        return 0
+    }
+
+    # Phase 2: Network scan (5s)
+    local elapsed=$(( $(date +%s) - start_time ))
+    ((elapsed >= 10)) && { recovery_timeout; return 1; }
+
+    log "INFO" "Phase 2: Scanning networks"
+    local networks
+    networks="$(scan_networks)" || {
+        log "ERROR" "Network scan failed"
+    }
+
+    # Phase 3: Smart switching (10s)
+    elapsed=$(( $(date +%s) - start_time ))
+    ((elapsed >= 20)) && { recovery_timeout; return 1; }
+
+    log "INFO" "Phase 3: Smart network switching"
+    if [[ -n $networks ]]; then
+        local best_ssid="" best_signal="-100"
+        while IFS=: read -r ssid signal; do
+            if ((signal > best_signal)); then
+                best_ssid="$ssid"
+                best_signal="$signal"
+            fi
+        done <<< "$networks"
+
+        if [[ -n $best_ssid ]]; then
+            connect_network "$best_ssid" && check_internet && {
+                recovery_success "Switched to $best_ssid"
+                return 0
+            }
+        fi
+    fi
+
+    # Phase 4: Aggressive fallback (5s)
+    elapsed=$(( $(date +%s) - start_time ))
+    ((elapsed >= 25)) && { recovery_timeout; return 1; }
+
+    log "WARN" "Phase 4: Aggressive reconnect"
+    sudo ifconfig wlan0 down
+    sleep 1
+    sudo ifconfig wlan0 up
+    sleep 2
+    check_internet && {
+        recovery_success "Interface restart"
+        return 0
+    }
+
+    # Phase 5: Nuclear option (5s)
+    elapsed=$(( $(date +%s) - start_time ))
+    ((elapsed >= 30)) && { recovery_timeout; return 1; }
+
+    log "ERROR" "Phase 5: Nuclear reset"
+    sudo systemctl restart networking 2>/dev/null || sudo service networking restart 2>/dev/null
+    sleep 3
+    check_internet && {
+        recovery_success "Full network restart"
+        return 0
+    }
+
+    recovery_timeout
+    return 1
+}
+
+# Recovery successful
+recovery_success() {
+    local method=$1
+    local elapsed=$(( $(date +%s) - recovery_start ))
+
+    RECOVERY_MODE=false
+    CONSECUTIVE_FAILURES=0
+    CHECK_INTERVAL=$NORMAL_CHECK_INTERVAL
+
+    log "INFO" "RECOVERY SUCCESS in ${elapsed}s via: $method"
+    log_event "Recovered" "$method (${elapsed}s)"
+}
+
+# Recovery timeout (>30s)
+recovery_timeout() {
+    log "ERROR" "RECOVERY TIMEOUT - Failed within 30s limit"
+    log_event "Failed" "Recovery timeout >30s"
+    RECOVERY_MODE=false
+}
+
+#===============================================================================
+# MAIN MONITORING LOOP
+#===============================================================================
+
+main() {
+    log "INFO" "Network Monitor v1.0 starting for $DEVICE_ID"
+
+    # Check WiFi interface
+    if ! check_wifi; then
+        log "ERROR" "WiFi interface check failed - exiting"
+        exit 1
+    fi
+
+    # Initialize directories
+    if ! init_dirs; then
+        log "ERROR" "Directory initialization failed - exiting"
+        exit 1
+    fi
+
+    local recovery_start=0
+
+    local smart_check_counter=0
+
+    while true; do
+        log "DEBUG" "=== Monitoring Loop Iteration ==="
+
+        # Get current network info
+        CURRENT_SSID="$(get_current_ssid)"
+        log "DEBUG" "Current SSID: ${CURRENT_SSID:-none}"
+
+        local signal latency speed quality state
+
+        if [[ -n $CURRENT_SSID ]]; then
+            signal="$(get_signal)" || signal="N/A"
+            latency="$(measure_latency)"
+
+            # Get REAL speed (from tmp file or history)
+            speed="$(get_upload_stats)"
+            if [[ -z $speed || $speed == "0" ]]; then
+                # No real data, try history
+                speed="$(get_network_average "$CURRENT_SSID")"
+                [[ $speed == "0" ]] && speed="$(measure_speed "$CURRENT_SSID")"
+            else
+                # Save real upload speed to history
+                save_network_history "$CURRENT_SSID" "$speed" "$(date +%s)"
+            fi
+
+            quality="$(signal_quality "${signal#-}")"
+            state="Connected"
+
+            log "DEBUG" "Network: $CURRENT_SSID | Signal: $signal | Speed: $speed KB/s | Latency: $latency ms"
+
+            # Update status files
+            update_status "$CURRENT_SSID" "$signal" "$speed" "$latency" "$quality" "$state"
+        else
+            log "DEBUG" "No network connection"
+            update_status "Disconnected" "N/A" "0" "N/A" "Poor" "Failed"
+        fi
+
+        # Internet check
+        if check_internet; then
+            CONSECUTIVE_FAILURES=0
+            CHECK_INTERVAL=$NORMAL_CHECK_INTERVAL
+            LAST_INTERNET_CHECK=$(date +%s)
+            log "DEBUG" "Internet check: OK"
+
+            # Smart switching check (every 3rd iteration when online)
+            ((smart_check_counter++))
+            if ((smart_check_counter >= 3)); then
+                smart_check_counter=0
+                log "DEBUG" "Periodic smart scan check"
+                smart_scan_and_switch
+            fi
+        else
+            ((CONSECUTIVE_FAILURES++))
+            log "DEBUG" "Internet check: FAILED (count: $CONSECUTIVE_FAILURES)"
+
+            # Trigger recovery after threshold failures
+            if ((CONSECUTIVE_FAILURES >= FAILURE_THRESHOLD)) && [[ $RECOVERY_MODE == false ]]; then
+                log "WARN" "Failure threshold reached - starting recovery"
+                recovery_start=$(date +%s)
+                recovery_mode_engage
+            fi
+        fi
+
+        # Adaptive interval
+        log "DEBUG" "Sleeping for ${CHECK_INTERVAL}s"
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+# Cleanup on exit
+trap 'log "INFO" "Network Monitor stopped"; exit 0' EXIT INT TERM
+
+# Start monitoring
+main "$@"

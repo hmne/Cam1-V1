@@ -1,0 +1,6 @@
+ingress:
+- hostname: XX.XX.com
+  service: http://localhost:80
+- hostname: XX.XX.com
+  service: ssh://localhost:22	
+- service: http_status:404

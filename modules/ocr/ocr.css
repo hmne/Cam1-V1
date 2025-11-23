@@ -1,0 +1,263 @@
+/**
+ * OCR Module Styles
+ *
+ * iOS-optimized, minimal, professional styling.
+ *
+ * @category  Modules
+ * @package   OCR
+ * @author    Net Storm
+ * @version   2.0.0
+ */
+
+/* ============================================================================
+   OCR BUTTON
+   ============================================================================ */
+
+.ocr-btn {
+    /* Display & Layout */
+    display: inline !important;
+    vertical-align: middle;
+    
+    /* Sizing */
+    width: auto !important;
+    padding: 0 4px !important;
+    margin: 0 !important;
+    margin-left: 4px !important;
+    
+    /* Typography */
+    font-size: 18px;
+    line-height: 1;
+    text-shadow: none !important;
+    
+    /* Visual */
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    
+    /* Interaction */
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    
+    /* Animation */
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: transform;
+    
+    /* Accessibility */
+    outline-offset: 2px;
+}
+
+.ocr-btn:hover {
+    transform: scale(1.2);
+}
+
+.ocr-btn:active {
+    transform: scale(0.95);
+}
+
+.ocr-btn:focus {
+    outline: 2px solid #4CAF50;
+    outline-offset: 3px;
+}
+
+.ocr-btn:focus-visible {
+    outline: 2px solid #4CAF50;
+    outline-offset: 3px;
+}
+
+.ocr-btn:focus:not(:focus-visible) {
+    outline: none;
+}
+
+.ocr-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+    pointer-events: none;
+}
+
+.ocr-btn.loading {
+    animation: ocr-pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes ocr-pulse {
+    0%, 100% { 
+        opacity: 1;
+        transform: scale(1);
+    }
+    50% { 
+        opacity: 0.6;
+        transform: scale(1.1);
+    }
+}
+
+/* ============================================================================
+   NOTIFICATIONS
+   ============================================================================ */
+
+.ocr-notification {
+    /* Positioning */
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 10000;
+    
+    /* Sizing */
+    max-width: 400px;
+    padding: 14px 24px;
+    
+    /* Typography */
+    font-size: 15px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 
+                 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 
+                 'Helvetica Neue', sans-serif;
+    font-weight: 500;
+    line-height: 1.5;
+    color: #ffffff;
+    text-align: left;
+    word-wrap: break-word;
+    
+    /* Visual */
+    background: rgba(33, 33, 33, 0.98);
+    border-radius: 8px;
+    border-left: 4px solid transparent;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4),
+                0 0 0 1px rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    
+    /* Animation Initial State */
+    opacity: 0;
+    transform: translateX(100%);
+    
+    /* Transitions */
+    transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.ocr-notification-success {
+    border-left-color: #4CAF50;
+}
+
+.ocr-notification-error {
+    border-left-color: #f44336;
+}
+
+.ocr-notification-warning {
+    border-left-color: #FF9800;
+}
+
+@keyframes ocr-slideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+@keyframes ocr-fadeOut {
+    from {
+        transform: translateX(0);
+        opacity: 1;
+    }
+    to {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+}
+
+.ocr-notification-fadeout {
+    animation: ocr-fadeOut 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* ============================================================================
+   RESPONSIVE DESIGN
+   ============================================================================ */
+
+@media (max-width: 1024px) {
+    .ocr-notification {
+        max-width: 350px;
+        font-size: 14px;
+    }
+}
+
+@media (max-width: 768px) {
+    .ocr-btn {
+        padding: 6px 12px !important;
+        font-size: 20px;
+        margin-left: 8px !important;
+    }
+    
+    .ocr-notification {
+        top: 10px;
+        right: 10px;
+        left: 10px;
+        max-width: none;
+        font-size: 13px;
+        padding: 12px 18px;
+    }
+}
+
+@media (max-width: 480px) {
+    .ocr-btn {
+        font-size: 22px;
+    }
+    
+    .ocr-notification {
+        font-size: 12px;
+        padding: 10px 16px;
+    }
+}
+
+/* ============================================================================
+   ACCESSIBILITY & PERFORMANCE
+   ============================================================================ */
+
+@media (prefers-contrast: high) {
+    .ocr-btn {
+        border: 2px solid currentColor !important;
+    }
+    
+    .ocr-notification {
+        border: 2px solid #ffffff;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ocr-btn,
+    .ocr-notification {
+        animation: none !important;
+        transition: none !important;
+    }
+    
+    .ocr-btn:hover,
+    .ocr-btn:active {
+        transform: none !important;
+    }
+}
+
+@media print {
+    .ocr-btn,
+    .ocr-notification {
+        display: none !important;
+    }
+}
+
+/* GPU Acceleration */
+.ocr-btn,
+.ocr-notification {
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+}
+
+/* Layout containment */
+.ocr-notification {
+    contain: layout style paint;
+}

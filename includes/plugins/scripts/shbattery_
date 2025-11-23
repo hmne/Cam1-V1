@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# PiSugar Battery Alert Monitor
+#
+# Monitors battery level and sends alerts when low.
+# Pure Bash - No dependencies, minimal resource usage.
+#
+# Features:
+# - Checks battery every 5 minutes
+# - Alerts at 15% (WARNING) and 10% (CRITICAL)
+# - 30-minute cooldown between alerts
+# - Uses storage.php API
+# - Fail-silent approach
+#
+# @author    Net Storm
+# @version   1.0.0
+# @standards Pure Bash, PSR-12 Equivalent, Clean Code
+#-------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------
+# Configuration
+#-------------------------------------------------------------------------------
+
+readonly DEVICE_ID="${DEVICE_ID:-cam1-V1}"
+readonly BASE_URL="http://XX.com/${DEVICE_ID}"
+readonly PISUGAR_HOST="127.0.0.1"
+readonly PISUGAR_PORT="8423"
+
+# Check intervals (seconds)
+readonly CHECK_INTERVAL=30        # 1 minutes
+
+# Alert thresholds (percentage)
+readonly CRITICAL_THRESHOLD=10
+readonly WARNING_THRESHOLD=15
+readonly LOW_THRESHOLD=20
+
+# Cooldown periods per level (seconds)
+readonly CRITICAL_COOLDOWN=300     # 5 minutes
+readonly WARNING_COOLDOWN=600      # 10 minutes
+readonly LOW_COOLDOWN=0            # No cooldown for LOW (one-time only)
+
+# State file (local to device)
+readonly STATE_FILE="/tmp/battery_alert_state.tmp"
+
+#-------------------------------------------------------------------------------
+# Initialize variables with safe defaults
+#-------------------------------------------------------------------------------
+
+last_alert_time=0
+last_alert_level=""
+alert_count=0
+
+#-------------------------------------------------------------------------------
+# Functions
+#-------------------------------------------------------------------------------
+
+# Get current Unix timestamp
+get_timestamp() {
+    date +%s
+}
+
+# Format timestamp for logging
+format_timestamp() {
+    TZ=Asia/Kuwait date '+%d/%m/%Y %I:%M:%S %p'
+}
+
+# Load previous state from file
+load_state() {
+    if [[ -f "$STATE_FILE" ]]; then
+        # Read state file (format: timestamp|level|count)
+        IFS='|' read -r last_alert_time last_alert_level alert_count < "$STATE_FILE" || true
+
+        # Validate numeric fields
+        [[ "$last_alert_time" =~ ^[0-9]+$ ]] || last_alert_time=0
+        [[ "$alert_count" =~ ^[0-9]+$ ]] || alert_count=0
+    fi
+}
+
+# Save current state to file
+save_state() {
+    local timestamp="$1"
+    local level="$2"
+
+    echo "${timestamp}|${level}|${alert_count}" > "$STATE_FILE" 2>/dev/null || true
+}
+
+# Check if cooldown period has passed
+can_send_alert() {
+    local cooldown="${1:-0}"
+    local now
+    now=$(get_timestamp)
+    local elapsed=$((now - last_alert_time))
+
+    [[ $elapsed -ge $cooldown ]]
+}
+
+# Send command to PiSugar via TCP - Pure Bash with nc
+pisugar_command() {
+    local command="$1"
+    local response
+
+    response=$(echo "$command" | nc -q 0 "$PISUGAR_HOST" "$PISUGAR_PORT" 2>/dev/null || echo "")
+
+    # Parse response (format: "key: value")
+    if [[ "$response" =~ :\ *([0-9.]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        echo ""
+    fi
+}
+
+# Get battery percentage
+get_battery_percentage() {
+    pisugar_command "get battery"
+}
+
+# Get battery voltage
+get_battery_voltage() {
+    pisugar_command "get battery_v"
+}
+
+# Check if battery is charging
+is_charging() {
+    local response
+    response=$(echo "get battery_charging" | nc -q 0 "$PISUGAR_HOST" "$PISUGAR_PORT" 2>/dev/null || echo "")
+
+    [[ "$response" =~ true ]]
+}
+
+# Send alert to server via storage.php
+send_alert() {
+    local percentage="$1"
+    local voltage="$2"
+    local level="$3"
+    local timestamp
+    timestamp=$(format_timestamp)
+
+    # Prepare log message
+    local log_msg="[${level}] Battery at ${percentage}% (${voltage}V) - ${timestamp}"
+
+    # Send to log file (append mode)
+    curl --silent --data "file=log/batmon/alerts.log&data=${log_msg}" \
+        "$BASE_URL/storage.php" -m 2 &>/dev/null || true
+
+    # Update alert status file (overwrite mode)
+    local status_data="${level}|${percentage}|${voltage}|$(get_timestamp)"
+    curl --silent --data "file=tmp/batmon/alert.tmp&data=${status_data}" \
+        "$BASE_URL/storage.php" -m 2 &>/dev/null || true
+
+    # Update state
+    alert_count=$((alert_count + 1))
+    save_state "$(get_timestamp)" "$level"
+}
+
+# Clear alert status (when battery is OK)
+clear_alert() {
+    curl --silent --data "file=tmp/batmon/alert.tmp&data=" \
+        "$BASE_URL/storage.php" -m 2 &>/dev/null || true
+}
+
+# Update battery status for plugin (always, not just alerts)
+update_battery_status() {
+    local percentage="$1"
+    local voltage="$2"
+    local charging="$3"
+    local timestamp
+    timestamp=$(get_timestamp)
+
+    # Format: percentage|voltage|charging|timestamp
+    local status_data="${percentage}|${voltage}|${charging}|${timestamp}"
+    curl --silent --data "file=tmp/batmon/status.tmp&data=${status_data}" \
+        "$BASE_URL/storage.php" -m 2 &>/dev/null || true
+}
+
+# Main check function
+check_battery() {
+    # Get battery data
+    local percentage
+    local voltage
+
+    percentage=$(get_battery_percentage)
+    voltage=$(get_battery_voltage)
+
+    # Validate data
+    if [[ -z "$percentage" ]] || [[ -z "$voltage" ]]; then
+        return 1
+    fi
+
+    # Check if charging
+    local charging="false"
+    if is_charging; then
+        charging="true"
+    fi
+
+    # Always update status for plugin
+    update_battery_status "$percentage" "$voltage" "$charging"
+
+    # Don't alert if charging
+    if [[ "$charging" == "true" ]]; then
+        return 0
+    fi
+
+    # Convert percentage to integer for comparison
+    local percent_int
+    percent_int=$(printf "%.0f" "$percentage")
+
+    # Determine alert level and cooldown
+    local alert_level=""
+    local cooldown=0
+
+    if [[ $percent_int -le $CRITICAL_THRESHOLD ]]; then
+        alert_level="CRITICAL"
+        cooldown=$CRITICAL_COOLDOWN
+    elif [[ $percent_int -le $WARNING_THRESHOLD ]]; then
+        alert_level="WARNING"
+        cooldown=$WARNING_COOLDOWN
+    elif [[ $percent_int -le $LOW_THRESHOLD ]]; then
+        alert_level="LOW"
+        cooldown=$LOW_COOLDOWN
+    else
+        # Battery OK - clear any previous alerts
+        clear_alert
+        return 0
+    fi
+
+    # Send alert if cooldown has passed
+    if can_send_alert "$cooldown"; then
+        send_alert "$percentage" "$voltage" "$alert_level"
+    fi
+
+    return 0
+}
+
+#-------------------------------------------------------------------------------
+# Main loop
+#-------------------------------------------------------------------------------
+
+# Load previous state
+load_state
+
+# Test PiSugar connection once at startup
+if command -v nc >/dev/null 2>&1; then
+    if ! nc -z "$PISUGAR_HOST" "$PISUGAR_PORT" 2>/dev/null; then
+        # PiSugar not available - exit silently (fail-silent approach)
+        exit 0
+    fi
+else
+    # nc not available - exit silently
+    exit 0
+fi
+
+# Main monitoring loop
+while true; do
+    check_battery || true
+    sleep "$CHECK_INTERVAL"
+done

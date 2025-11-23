@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+
+#===============================================================================
+# MONITOR SCRIPT - Camera Status Monitoring
+#===============================================================================
+set -Eeuo pipefail
+
+
+#===============================================================================
+# CONFIG
+#===============================================================================
+readonly DEVICE_ID="${DEVICE_ID:-cam1-V1}"
+readonly BASE_URL="http://XX.com/${DEVICE_ID}"
+readonly CAM_NUM="${DEVICE_ID#cam}"
+
+# Export for external use
+export DEVICE_ID BASE_URL CAM_NUM
+
+# Counters and state
+IMG_COUNT=0
+NET_CHECK_COUNTER=15
+NET_FAILURES=0
+failure_start=""
+
+# Resolution mappings
+declare -A RESOLUTIONS=(
+    [1]="1280x960"
+    [2]="1920x1440"
+    [3]="2592x1944"
+    [4]="3200x2400"
+)
+
+# Export for external use
+export IMG_COUNT NET_CHECK_COUNTER NET_FAILURES
+
+
+#===============================================================================
+# TRAP HANDLERS
+#===============================================================================
+cleanup() {
+    local exit_code=${1:-$?}
+
+    pkill -9 raspistill 2>/dev/null || :
+    [[ -f pic.jpg ]] && rm -f pic.jpg
+
+    exit "$exit_code"
+}
+
+
+err_trap() {
+    local exit_code=$? line="${BASH_LINENO[0]}" func="${FUNCNAME[1]:-main}"
+    printf '[ERROR] %s:%s (exit %d)\n' "$func" "$line" "$exit_code" >&2
+}
+
+
+trap 'cleanup $?' EXIT INT TERM
+trap err_trap ERR
+
+
+#===============================================================================
+# LOGGING
+#===============================================================================
+log() {
+    printf '[%s] [%s] %s\n' "$(date '+%H:%M:%S')" "$1" "$2"
+}
+
+
+log_web() {
+    local message="$1" attempt
+
+    for attempt in {1..2}; do
+        if curl -sf --max-time 5 --data-urlencode "file=log/log.txt" \
+            --data-urlencode "data=${message}" "${BASE_URL}/storage.php" >/dev/null 2>&1; then
+            [[ $attempt -gt 1 ]] && log "INFO" "Web log succeeded on attempt $attempt"
+            return 0
+        fi
+        sleep 1
+    done
+
+    return 1
+}
+
+
+#===============================================================================
+# UTILITY FUNCTIONS
+#===============================================================================
+
+# Wait for camera availability
+wait_camera() {
+    local wait=0
+
+    while ((wait++ < 5)); do
+        if command -v fuser &>/dev/null; then
+            fuser -s /dev/video0 2>/dev/null || return 0
+        else
+            pgrep -x raspistill >/dev/null 2>&1 || return 0
+        fi
+        sleep 1
+    done
+
+    return 1
+}
+
+
+# Get WiFi quality (Pure Bash)
+get_wifi_quality() {
+    local iwconfig_out link_line=""
+    iwconfig_out="$(iwconfig wlan0 2>/dev/null)" || { echo "N/A"; return; }
+
+    while IFS= read -r line; do
+        [[ $line == *"Link Quality"* ]] && {
+            link_line="${line#"${line%%[![:space:]]*}"}"
+            break
+        }
+    done <<< "$iwconfig_out"
+
+    echo "${link_line:-N/A}"
+}
+
+
+# Get TX bytes (Pure Bash)
+get_tx_bytes() {
+    local ifconfig_out
+    ifconfig_out="$(ifconfig wlan0 2>/dev/null)" || { echo "N/A"; return; }
+
+    [[ $ifconfig_out =~ TX[^(]*\(([^)]+)\) ]] && echo "${BASH_REMATCH[1]}" || echo "N/A"
+}
+
+
+# Convert bytes to human readable (Pure Bash)
+size_conv() {
+    local bytes=$1
+
+    if ((bytes < 1024)); then
+        echo "${bytes}B"
+    elif ((bytes < 1048576)); then
+        echo "$((bytes / 1024)).$(((bytes % 1024) * 10 / 1024))KB"
+    elif ((bytes < 1073741824)); then
+        echo "$((bytes / 1048576)).$(((bytes % 1048576) * 10 / 1048576))MB"
+    else
+        echo "$((bytes / 1073741824)).$(((bytes % 1073741824) * 10 / 1073741824))GB"
+    fi
+}
+
+
+# Convert speed (KB/s → MB/s if >= 1024)
+speed_conv() {
+    local kbps=$1
+
+    if ((kbps >= 1024)); then
+        local mbps_int=$((kbps / 1024))
+        local mbps_dec=$(((kbps % 1024) * 10 / 1024))
+        echo "${mbps_int}.${mbps_dec} MB/s"
+    else
+        echo "${kbps} KB/s"
+    fi
+}
+
+
+# Convert time (ms → s if >= 1000)
+time_conv() {
+    local ms=$1
+
+    if ((ms >= 1000)); then
+        local sec_int=$((ms / 1000))
+        local sec_dec=$(((ms % 1000) / 100))
+        echo "${sec_int}.${sec_dec}s"
+    else
+        echo "${ms}ms"
+    fi
+}
+
+
+#===============================================================================
+# MAIN LOOP
+#===============================================================================
+main() {
+    log "INFO" "=== MONITOR SERVICE STARTED ==="
+
+    while true; do
+        # Read from SERVER via curl (not local file)
+        local cam_status
+        cam_status="$(curl -sf -H 'Cache-Control: no-cache' "${BASE_URL}/tmp/onoff.tmp" -m 3 2>/dev/null)" || cam_status=""
+
+        if [[ -n $cam_status ]]; then
+            # Internet connection OK
+            NET_FAILURES=0
+
+            if [[ $cam_status == "on" ]]; then
+                # Read settings from SERVER
+                local cam_settings
+                cam_settings="$(curl -sf -H 'Cache-Control: no-cache' "${BASE_URL}/tmp/var.tmp" -m 3 2>/dev/null)" || cam_settings=""
+
+                # Parse settings with local IFS
+                local res_level quality exposure saturation rotation effect sharpness
+                IFS=' ' read -r res_level quality exposure saturation rotation effect sharpness <<< "${cam_settings:-}"
+
+                # Validate resolution level
+                [[ -z $res_level || ! ${RESOLUTIONS[$res_level]+_} ]] && res_level=3
+
+                # Get resolution
+                local width height
+                IFS='x' read -r width height <<< "${RESOLUTIONS[$res_level]}"
+
+                # Handle rotation swap
+                if [[ $rotation == "90" || $rotation == "270" ]]; then
+                    local temp=$width
+                    width=$height
+                    height=$temp
+                fi
+
+                # Wait for camera
+                if ! wait_camera; then
+                    local ts
+                    ts="$(TZ=Asia/Kuwait date '+%d/%m/%Y %I:%M:%S %p' 2>/dev/null || date '+%d/%m/%Y %I:%M:%S %p')"
+                    log_web "Camera Busy: Still in use, ${ts}."
+                    sleep 2
+                    continue
+                fi
+
+                # Capture image
+                if raspistill -drc high -mm average -awb auto -ex auto \
+                    -rot "${rotation:-0}" -ifx "${effect:-none}" -sh "${sharpness:-0}" \
+                    -sa "${saturation:--35}" -ISO 0 -ss "${exposure:-0}" -q "${quality:-10}" \
+                    -w "$width" -h "$height" -o pic.jpg -n -t 300 \
+                    -a "NS-CAM${CAM_NUM} ${width}x${height}" 2>/dev/null; then
+
+                    # Optimize
+                    if command -v jpegoptim &>/dev/null; then
+                        jpegoptim --strip-all -q pic.jpg 2>/dev/null || :
+                    fi
+
+                    # Export operational state
+                    echo "uploading" > /tmp/camera_state.tmp 2>/dev/null || :
+
+                    # Track upload performance
+                    local upload_start upload_end upload_time upload_speed file_bytes
+                    upload_start="$(date +%s%3N)"
+
+                    file_bytes=$(stat -c%s pic.jpg 2>/dev/null || echo 0)
+
+                    # Upload via centralized storage.php
+                    curl -sf -F "upfile=@pic.jpg" "${BASE_URL}/storage.php" -m 10 >/dev/null 2>&1 || :
+
+                    # Calculate upload performance
+                    upload_end="$(date +%s%3N)"
+                    upload_time=$((upload_end - upload_start))
+
+                    if ((upload_time > 0 && file_bytes > 0)); then
+                        upload_speed=$((file_bytes * 1000 / upload_time / 1024))
+                        echo "${upload_speed}|${upload_time}|${file_bytes}|$(date +%s)" > /tmp/upload_stats.tmp 2>/dev/null || :
+                    fi
+
+                    # Reset operational state
+                    echo "idle" > /tmp/camera_state.tmp 2>/dev/null || :
+
+                    # Update status in parallel
+                    curl -sf --max-time 3 --data-urlencode "file=tmp/libre.tmp" \
+                        --data-urlencode "data=on" "${BASE_URL}/storage.php" >/dev/null 2>&1 &
+
+                    curl -sf --max-time 3 --data-urlencode "file=tmp/onoff.tmp" \
+                        --data-urlencode "data=off" "${BASE_URL}/storage.php" >/dev/null 2>&1 &
+
+                    # Log success with performance metrics
+                    ((IMG_COUNT++)) || IMG_COUNT=1
+
+                    local ts img_size upload_speed_display upload_time_display
+                    ts="$(TZ=Asia/Kuwait date '+%d/%m/%Y %I:%M:%S %p' 2>/dev/null || date '+%d/%m/%Y %I:%M:%S %p')"
+                    img_size="$(size_conv "$file_bytes")"
+                    upload_speed_display="$(speed_conv "${upload_speed:-0}")"
+                    upload_time_display="$(time_conv "${upload_time:-0}")"
+
+                    log_web "Web Capture OK: Counter: ${IMG_COUNT}, Res: ${width}x${height}, Size: ${img_size}, Upload: ${upload_speed_display} (${upload_time_display}), ${ts}."
+                else
+                    # Log failure
+                    local ts
+                    ts="$(TZ=Asia/Kuwait date '+%d/%m/%Y %I:%M:%S %p' 2>/dev/null || date '+%d/%m/%Y %I:%M:%S %p')"
+                    log_web "Camera Capture Error: Busy/Failed, ${ts}."
+                fi
+            fi
+
+            ((NET_CHECK_COUNTER++)) || NET_CHECK_COUNTER=16
+
+            # Log extended internet failures
+            if ((NET_FAILURES >= 5)) && [[ -n $failure_start ]]; then
+                local ts
+                ts="$(TZ=Asia/Kuwait date '+%a %d %b %Y %I:%M:%S %p %Z' 2>/dev/null || date)"
+
+                curl -sf --max-time 5 --data-urlencode "file=log/ping.txt" \
+                    --data-urlencode "data=Fail Internet from: ${failure_start} to: ${ts}, ${NET_FAILURES} tries." \
+                    "${BASE_URL}/storage.php" >/dev/null 2>&1 || :
+
+                NET_FAILURES=0
+            fi
+
+            # Periodic internet status logging
+            if ((NET_CHECK_COUNTER >= 30)); then
+                NET_CHECK_COUNTER=0
+
+                local ts wifi_quality tx_bytes
+                ts="$(TZ=Asia/Kuwait date '+%a %d %b %Y %I:%M:%S %p %Z' 2>/dev/null || date)"
+                wifi_quality="$(get_wifi_quality)"
+                tx_bytes="$(get_tx_bytes)"
+
+                curl -sf --max-time 5 --data-urlencode "file=log/ping.txt" \
+                    --data-urlencode "data=Internet OK: ${ts}, ${wifi_quality}, ${tx_bytes}" \
+                    "${BASE_URL}/storage.php" >/dev/null 2>&1 || :
+            fi
+        else
+            # Internet connection failure
+            ((NET_FAILURES++)) || NET_FAILURES=1
+            ((NET_FAILURES == 1)) && failure_start="$(TZ=Asia/Kuwait date '+%a %d %b %Y %I:%M:%S %p %Z' 2>/dev/null || date)"
+        fi
+
+        sleep 1
+    done
+}
+
+
+main "$@"

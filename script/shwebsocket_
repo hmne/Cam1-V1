@@ -1,0 +1,514 @@
+#!/usr/bin/env bash
+
+#===============================================================================
+# WEBSOCKET CLIENT - Real-time Camera Communication
+#
+# Everything goes through WebSocket - NO HTTP!
+# Camera → WebSocket → VPS → WebSocket → Browser
+#
+# @version 2.0.0
+# @author Net Storm
+#===============================================================================
+set -Eeuo pipefail
+
+
+#===============================================================================
+# CONFIG
+#===============================================================================
+readonly DEVICE_ID="${DEVICE_ID:-cam1}"
+readonly BASE_URL="${BASE_URL:-http://netstorm.site/${DEVICE_ID}}"
+
+# WebSocket server address
+readonly WS_SERVER="193.160.119.136:8443"
+
+readonly STATUS_INTERVAL=1
+readonly MAX_RECONNECT_DELAY=30
+
+# File paths (all in /tmp - nothing permanent on device)
+readonly VAR_FILE="/tmp/var.tmp"
+readonly PIC_FILE="/tmp/pic.jpg"
+readonly LIVE_FILE="/tmp/web_live.tmp"
+readonly LOG_FILE="/tmp/websocket.log"
+
+# Live stream quality presets: width height quality
+declare -A QUALITY_PRESETS=(
+    ["very-low"]="480 360 15"
+    ["low"]="640 480 25"
+    ["medium"]="800 600 35"
+    ["high"]="1024 768 50"
+)
+
+# Current live settings
+LIVE_WIDTH=480
+LIVE_HEIGHT=360
+LIVE_QUALITY=15
+LIVE_ACTIVE=false
+
+# Communication pipe
+WS_PIPE=""
+
+# Export for consistency
+export DEVICE_ID BASE_URL
+
+
+#===============================================================================
+# TRAP HANDLERS
+#===============================================================================
+cleanup() {
+    local exit_code=${1:-$?}
+
+    LIVE_ACTIVE=false
+
+    # Kill background jobs
+    jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || :
+
+    # Remove pipe and symlink
+    [[ -n "$WS_PIPE" ]] && rm -f "$WS_PIPE"
+    rm -f /tmp/websocket_pipe
+
+    exit "$exit_code"
+}
+
+
+err_trap() {
+    local exit_code=$? line="${BASH_LINENO[0]}" func="${FUNCNAME[1]:-main}"
+    printf '[ERROR] %s:%s (exit %d)\n' "$func" "$line" "$exit_code" >&2
+}
+
+
+trap 'cleanup $?' EXIT INT TERM
+trap err_trap ERR
+
+
+#===============================================================================
+# LOGGING
+#===============================================================================
+log() {
+    printf '[%s] [%s] %s\n' "$(date '+%H:%M:%S')" "$1" "$2"
+}
+
+
+log_file() {
+    local msg="$1"
+    printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> "$LOG_FILE" 2>/dev/null || :
+}
+
+
+#===============================================================================
+# AUTO-INSTALL WEBSOCAT
+#===============================================================================
+ensure_websocat() {
+    command -v websocat &>/dev/null && return 0
+
+    log "INFO" "Installing websocat..."
+
+    local arch url_website url_github
+    arch=$(uname -m)
+
+    # Set URLs based on architecture
+    case "$arch" in
+        aarch64|arm64)
+            url_website="${BASE_URL}/downloads/websocat-aarch64"
+            url_github="https://github.com/vi/websocat/releases/download/v1.14.0/websocat.aarch64-unknown-linux-musl"
+            ;;
+        armv7l|armhf|armv6l)
+            url_website="${BASE_URL}/downloads/websocat-armv7"
+            url_github="https://github.com/vi/websocat/releases/download/v1.14.0/websocat.arm-unknown-linux-musleabi"
+            ;;
+        *)
+            log "ERROR" "Unsupported architecture: $arch"
+            return 1
+            ;;
+    esac
+
+    local tmp_file="/tmp/websocat_$$"
+
+    # Try website first (faster, local)
+    if wget -q --timeout=30 "$url_website" -O "$tmp_file" 2>/dev/null && [[ -s "$tmp_file" ]]; then
+        chmod +x "$tmp_file"
+        sudo mv "$tmp_file" /usr/local/bin/websocat
+        log "INFO" "websocat installed from website"
+        return 0
+    fi
+
+    # Fallback to GitHub
+    log "INFO" "Trying GitHub fallback..."
+    if wget -q --timeout=60 "$url_github" -O "$tmp_file" 2>/dev/null && [[ -s "$tmp_file" ]]; then
+        chmod +x "$tmp_file"
+        sudo mv "$tmp_file" /usr/local/bin/websocat
+        log "INFO" "websocat installed from GitHub"
+        return 0
+    fi
+
+    rm -f "$tmp_file"
+    log "ERROR" "Failed to download websocat"
+    return 1
+}
+
+
+#===============================================================================
+# SEND MESSAGE (via pipe)
+#===============================================================================
+ws_send() {
+    # Use pathname so all subshells can write
+    [[ -n "$WS_PIPE" && -p "$WS_PIPE" ]] && printf '%s\n' "$1" > "$WS_PIPE" 2>/dev/null || :
+}
+
+
+#===============================================================================
+# SYSTEM STATUS (matches sync.sh format exactly)
+#===============================================================================
+
+# Get TX bytes (Upload data - camera uploads more than downloads)
+get_tx_bytes() {
+    local ifconfig_out
+    ifconfig_out="$(ifconfig wlan0 2>/dev/null)" || { echo "N/A"; return; }
+    [[ $ifconfig_out =~ TX[^(]*\(([^)]+)\) ]] && echo "${BASH_REMATCH[1]}" || echo "N/A"
+}
+
+# Get CPU temperature (integer only - no decimals)
+get_cpu_temp() {
+    local temp_file="/sys/class/thermal/thermal_zone0/temp"
+    [[ -r $temp_file ]] && echo "$(($(< "$temp_file") / 1000))°C" || echo "N/A"
+}
+
+# Get ping time (to netstorm.site - most accurate for actual latency)
+get_ping_time() {
+    local ping_out
+    ping_out="$(ping -c 1 -W 1 netstorm.site 2>/dev/null)" || { echo "N/A"; return; }
+    [[ $ping_out =~ time=([0-9.]+[[:space:]]*ms) ]] && echo "${BASH_REMATCH[1]}" || echo "N/A"
+}
+
+# Get WiFi signal quality (textual - Bad/Regular/Good/Very Good/Excellent)
+get_wifi_quality() {
+    local signal_line level
+    signal_line="$(iwconfig wlan0 2>/dev/null)" || { echo "Unknown"; return; }
+
+    if [[ $signal_line =~ Signal\ level=(-?[0-9]+) ]]; then
+        level="${BASH_REMATCH[1]#-}"
+    else
+        echo "Unknown"
+        return
+    fi
+
+    if ((level >= 70)); then echo "Bad"
+    elif ((level >= 60)); then echo "Regular"
+    elif ((level >= 50)); then echo "Good"
+    elif ((level >= 40)); then echo "Very Good"
+    else echo "Excellent"
+    fi
+}
+
+get_system_status() {
+    local tx_bytes cpu_temp ping_time wifi_quality
+
+    tx_bytes="$(get_tx_bytes)"
+    cpu_temp="$(get_cpu_temp)"
+    ping_time="$(get_ping_time)"
+    wifi_quality="$(get_wifi_quality)"
+
+    printf '%s,%s,%s,%s' "$tx_bytes" "$cpu_temp" "$ping_time" "$wifi_quality"
+}
+
+
+#===============================================================================
+# CAPTURE IMAGE - DISABLED (Now handled by main.sh via HTTP)
+#
+# WebSocket is for commands only. Images go through HTTP via main.sh for:
+# - Better reliability (no Base64 overhead = 33% smaller)
+# - Faster uploads (native binary transfer)
+# - No JSON size limits (Base64 in JSON fails at ~64KB)
+#
+# Flow: Browser → WebSocket → Pi writes /tmp/onoff.tmp → main.sh → HTTP upload
+#===============================================================================
+# capture_image() {
+#     # DISABLED - main.sh handles all captures via HTTP
+#     :
+# }
+
+
+#===============================================================================
+# LIVE FRAME - Send via WebSocket (base64)
+#===============================================================================
+capture_live_frame() {
+    local tmp_file="/tmp/live_frame.jpg"
+
+    # Capture with current quality settings
+    if ! raspistill -w "$LIVE_WIDTH" -h "$LIVE_HEIGHT" -q "$LIVE_QUALITY" -t 1 -n -o "$tmp_file" 2>/dev/null; then
+        return 1
+    fi
+
+    # Encode and send
+    local base64_data
+    base64_data=$(base64 -w 0 "$tmp_file" 2>/dev/null)
+    rm -f "$tmp_file"
+
+    ws_send '{"type":"live_frame","data":"'"$base64_data"'","timestamp":'"$(date +%s%3N)"'}'
+}
+
+
+#===============================================================================
+# LIVE STREAM LOOP
+#===============================================================================
+live_stream_loop() {
+    log "INFO" "Live stream started (${LIVE_WIDTH}x${LIVE_HEIGHT} q=${LIVE_QUALITY})"
+
+    while $LIVE_ACTIVE; do
+        capture_live_frame
+
+        # Adaptive delay based on quality
+        case "$LIVE_QUALITY" in
+            15) sleep 0.5 ;;   # very-low: ~2 FPS
+            25) sleep 0.4 ;;   # low: ~2.5 FPS
+            35) sleep 0.5 ;;   # medium: ~2 FPS
+            50) sleep 0.7 ;;   # high: ~1.5 FPS
+            *)  sleep 0.5 ;;
+        esac
+    done
+
+    log "INFO" "Live stream stopped"
+}
+
+
+#===============================================================================
+# STATUS SENDER LOOP
+#===============================================================================
+status_sender_loop() {
+    while true; do
+        local status
+        status=$(get_system_status)
+
+        ws_send '{"type":"status","data":"'"$status"'"}'
+
+        sleep "$STATUS_INTERVAL"
+    done
+}
+
+
+#===============================================================================
+# MESSAGE HANDLER
+#===============================================================================
+handle_message() {
+    local msg="$1"
+    local msg_type
+
+    msg_type=$(printf '%s' "$msg" | grep -oP '"type"\s*:\s*"\K[^"]+' || echo "")
+
+    case "$msg_type" in
+        capture)
+            local cid
+            cid=$(printf '%s' "$msg" | grep -oP '"id"\s*:\s*"\K[^"]+' || date +%s)
+
+            # Trigger main.sh via local file - main.sh handles capture & HTTP upload
+            printf 'on\n' > /tmp/onoff.tmp 2>/dev/null || :
+
+            # Acknowledge receipt
+            ws_send '{"type":"capture_ack","id":"'"$cid"'"}'
+            ;;
+
+        live_start)
+            # Get quality from message
+            local quality
+            quality=$(printf '%s' "$msg" | grep -oP '"quality"\s*:\s*"\K[^"]+' || echo "very-low")
+
+            # Map quality presets to live.sh format (width height jpeg_quality)
+            local live_quality_setting
+            case "$quality" in
+                very-low) live_quality_setting="480 360 8" ;;
+                low)      live_quality_setting="640 480 15" ;;
+                medium)   live_quality_setting="800 600 25" ;;
+                high)     live_quality_setting="1024 768 35" ;;
+                *)        live_quality_setting="480 360 8" ;;
+            esac
+
+            # PRIMARY: Trigger live.sh via local files (instant!)
+            printf 'on\n' > /tmp/web_live.tmp 2>/dev/null || :
+            printf '%s\n' "$live_quality_setting" > /tmp/web_live_quality.tmp 2>/dev/null || :
+
+            # SECONDARY: Built-in WebSocket live - DISABLED (causes camera busy)
+            # live.sh handles all live streaming (faster and more reliable)
+            # if ! $LIVE_ACTIVE; then
+            #     local preset="${QUALITY_PRESETS[$quality]:-${QUALITY_PRESETS[very-low]}}"
+            #     read -r LIVE_WIDTH LIVE_HEIGHT LIVE_QUALITY <<< "$preset"
+            #     LIVE_ACTIVE=true
+            #     live_stream_loop &
+            # fi
+
+            ws_send '{"type":"live_status","active":true}'
+            log "INFO" "Live started: $quality (via live.sh only)"
+            ;;
+
+        live_stop)
+            # PRIMARY: Stop live.sh via local file
+            printf 'off\n' > /tmp/web_live.tmp 2>/dev/null || :
+
+            # SECONDARY: Stop built-in WebSocket live - DISABLED
+            # LIVE_ACTIVE=false
+
+            ws_send '{"type":"live_status","active":false}'
+            log "INFO" "Live stopped (via live.sh only)"
+            ;;
+
+        settings)
+            local data
+            data=$(printf '%s' "$msg" | grep -oP '"data"\s*:\s*"\K[^"]+' || echo "")
+
+            # Write to local file for main.sh/monitor.sh to read
+            [[ -n "$data" ]] && printf '%s\n' "$data" > "$VAR_FILE"
+
+            log "INFO" "Settings updated"
+            ws_send '{"type":"settings_ack","success":true}'
+            ;;
+
+        shutdown)
+            log "INFO" "Shutdown command received via WebSocket"
+            # Write trigger file for sync.sh to execute
+            printf 'shutdown\n' > /tmp/shutdown.tmp 2>/dev/null || :
+            ws_send '{"type":"shutdown_ack","executing":true}'
+            log "INFO" "Shutdown trigger created - sync.sh will execute"
+            ;;
+
+        reboot)
+            log "INFO" "Reboot command received via WebSocket"
+            # Write trigger file for sync.sh to execute
+            printf 'reboot\n' > /tmp/reboot.tmp 2>/dev/null || :
+            ws_send '{"type":"reboot_ack","executing":true}'
+            log "INFO" "Reboot trigger created - sync.sh will execute"
+            ;;
+
+        request_status)
+            # Homepage requests current status
+            local status
+            status=$(get_system_status 2>/dev/null || echo "N/A")
+            ws_send '{"type":"status_response","data":"'"$status"'"}'
+            ;;
+
+        request_tunnels)
+            # Homepage requests tunnel URLs
+            local urls=""
+            for i in {1..4}; do
+                local url
+                url=$(<"/tmp/url${i}.tmp" 2>/dev/null) || url=""
+                urls="${urls}\"url${i}\":\"${url}\","
+            done
+            urls="${urls%,}"  # Remove trailing comma
+            ws_send '{"type":"tunnels_response",'"$urls"'}'
+            ;;
+
+        ping)
+            # Keepalive ping from server
+            ws_send '{"type":"pong"}'
+            ;;
+
+        data_upload)
+            # sync.sh uploads data via WebSocket
+            local file data
+            file=$(printf '%s' "$msg" | grep -oP '"file"\s*:\s*"\K[^"]+' || echo "")
+            data=$(printf '%s' "$msg" | grep -oP '"data"\s*:\s*"\K[^"]+' || echo "")
+
+            if [[ -n "$file" && -n "$data" ]]; then
+                # Forward to VPS (VPS will handle storage.php equivalent)
+                ws_send "$msg"
+                log "INFO" "Forwarded data_upload: $file"
+            fi
+            ;;
+
+        *)
+            [[ -n "$msg_type" ]] && log "WARN" "Unknown: $msg_type"
+            ;;
+    esac
+}
+
+
+#===============================================================================
+# WEBSOCKET CONNECTION
+#===============================================================================
+ws_connect() {
+    log "INFO" "Connecting to $WS_SERVER"
+    log_file "Connecting to $WS_SERVER"
+
+    # Create communication pipe
+    WS_PIPE="/tmp/ws_pipe_$$"
+    rm -f "$WS_PIPE"
+    mkfifo "$WS_PIPE"
+
+    # Create stable symlink for other scripts
+    ln -sf "$WS_PIPE" /tmp/websocket_pipe 2>/dev/null || :
+
+    # Start pipeline in background first (so cat opens pipe for reading)
+    {
+        # Identify as camera
+        printf '{"type":"identify","role":"camera","cameraId":"%s"}\n' "$DEVICE_ID"
+
+        # Forward all messages from pipe
+        cat "$WS_PIPE"
+    } | websocat -t --insecure "wss://${WS_SERVER}" 2>&1 | while IFS= read -r line; do
+        handle_message "$line"
+    done &
+    local pipeline_pid=$!
+
+    # Wait for cat to open the pipe for reading
+    sleep 0.2
+
+    # Now open pipe for writing (won't block because reader exists)
+    exec 3>"$WS_PIPE"
+
+    # Real-time status sender (updates browser every second)
+    # WebSocket PRIMARY path - collects and sends status every 1s
+    # sync.sh is FALLBACK (HTTP) - updates every 10s
+    {
+        while true; do
+            # Collect real-time system status directly
+            local status_data
+            status_data=$(get_system_status 2>/dev/null || echo "N/A,N/A,N/A,N/A")
+
+            ws_send '{"type":"status","data":"'"$status_data"'"}'
+            sleep 1
+        done
+    } &
+    local status_pid=$!
+
+    # Wait for pipeline to end
+    wait "$pipeline_pid" 2>/dev/null || :
+
+    # Cleanup
+    exec 3>&-
+    kill "$status_pid" 2>/dev/null || :
+    rm -f "$WS_PIPE"
+    WS_PIPE=""
+
+    log "WARN" "Connection closed"
+    return 1
+}
+
+
+#===============================================================================
+# MAIN
+#===============================================================================
+main() {
+    log "INFO" "WebSocket client starting for $DEVICE_ID"
+    log "INFO" "Server: wss://$WS_SERVER"
+    log_file "Starting WebSocket client"
+
+    # Install websocat if needed
+    if ! ensure_websocat; then
+        log "ERROR" "Cannot install websocat"
+        exit 0
+    fi
+
+    # Reconnection loop
+    local delay=2
+    while true; do
+        if ws_connect; then
+            delay=2
+        else
+            log "INFO" "Reconnecting in ${delay}s..."
+        fi
+
+        sleep "$delay"
+
+        ((delay = delay < MAX_RECONNECT_DELAY ? delay * 2 : MAX_RECONNECT_DELAY))
+    done
+}
+
+main "$@"
