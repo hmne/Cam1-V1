@@ -1,0 +1,115 @@
+# =============================================================================
+# .gitignore - Following GitHub's recommended patterns + security best practices
+# Standards: OWASP Security, Twelve-Factor App
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Security-Critical Files (OWASP Top 10 - A02:2021 Cryptographic Failures)
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.p12
+*.pfx
+config/api-keys.php
+*credentials*
+*secret*
+
+# -----------------------------------------------------------------------------
+# Sensitive Data & Logs
+# -----------------------------------------------------------------------------
+log/*.log
+log/*.txt
+!log/.gitkeep
+tmp/*.tmp
+!tmp/.gitkeep
+
+# -----------------------------------------------------------------------------
+# User-Generated Content & Runtime Data
+# -----------------------------------------------------------------------------
+*.jpg
+*.jpeg
+*.png
+!assets/images/*.jpg
+!assets/images/*.png
+!assets/images/*.ico
+!web/*.jpg
+!buffer.jpg
+
+# -----------------------------------------------------------------------------
+# System & IDE Files
+# -----------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.vim/
+*.sublime-project
+*.sublime-workspace
+
+# -----------------------------------------------------------------------------
+# Dependencies & Build Artifacts
+# -----------------------------------------------------------------------------
+node_modules/
+vendor/
+bower_components/
+composer.phar
+composer.lock
+package-lock.json
+yarn.lock
+
+# -----------------------------------------------------------------------------
+# Compiled & Optimized Files
+# -----------------------------------------------------------------------------
+*.min.js.map
+*.min.css.map
+dist/
+build/
+
+# -----------------------------------------------------------------------------
+# Cache & Temporary Files
+# -----------------------------------------------------------------------------
+.cache/
+*.cache
+.sass-cache/
+*.pid
+*.seed
+*.pid.lock
+
+# -----------------------------------------------------------------------------
+# Testing & Coverage
+# -----------------------------------------------------------------------------
+coverage/
+.nyc_output/
+*.coverage
+htmlcov/
+.pytest_cache/
+phpunit.xml
+.phpunit.result.cache
+
+# -----------------------------------------------------------------------------
+# Git & Version Control
+# -----------------------------------------------------------------------------
+*.orig
+*.rej
+*.patch
