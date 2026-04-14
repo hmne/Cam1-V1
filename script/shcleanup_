@@ -1,27 +1,77 @@
 #!/usr/bin/env bash
 
-#===============================================================================
-# CLEANUP SCRIPT - System Maintenance and Process Monitoring
-#===============================================================================
-set -Eeuo pipefail
+#set -euo pipefail
+IFS=$'\n\t'
 
+#-------------------------------------------------------------------------------
+# Configuration
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# CONFIG
-#===============================================================================
-readonly DEVICE_ID="${DEVICE_ID:-cam1-V1}"
-readonly BASE_URL="http://XX.com/${DEVICE_ID}"
-readonly VERSION="1.0.0"
+readonly DEVICE_ID="${DEVICE_ID:-cam1}"
+readonly BASE_URL="http://netstorm.site/${DEVICE_ID}"
 
-# Export for external use
-export DEVICE_ID BASE_URL VERSION
+#######################################
+# Error trap handler for ERR signal.
+# Logs error details to stderr and uploads to server log.
+# Globals:
+#   BASH_LINENO
+#   FUNCNAME
+#   BASH_COMMAND
+#   BASE_URL
+# Outputs:
+#   Writes error message to stderr
+# Returns:
+#   None (trap handler)
+#######################################
+err_trap() {
+    local exit_code=$?
+    local line="${BASH_LINENO[0]}"
+    local func="${FUNCNAME[1]:-main}"
+    local cmd="${BASH_COMMAND}"
 
-# Get MAC address for logging
+    printf '[%s] [ERROR] Command failed (exit %s) at line %s in %s(): %s\n' \
+        "$(date '+%H:%M:%S')" "$exit_code" "$line" "$func" "$cmd" >&2
+
+    curl -sf --data "file=log/error.txt&data=[CRITICAL] CLEANUP Line ${line} in ${func}(): ${cmd} (exit ${exit_code})" \
+        "${BASE_URL}/storage.php" -m 2 >/dev/null 2>&1 || :
+}
+
+trap err_trap ERR
+
+#######################################
+# Cleanup handler for EXIT/INT/TERM signals.
+# Terminates all background jobs gracefully.
+# Arguments:
+#   $1 - Optional exit code (default: 0)
+# Returns:
+#   Exits with provided code or 0
+#######################################
+cleanup() {
+    local pids
+    pids="$(jobs -p 2>/dev/null)" || :
+    [[ -n $pids ]] && {
+        echo "$pids" | xargs -r kill -TERM 2>/dev/null || :
+        echo "$pids" | xargs -r wait 2>/dev/null || :
+    }
+    exit "${1:-0}"
+}
+
+trap 'cleanup $?' EXIT INT TERM
+
+#######################################
+# Get WiFi MAC address for device identification.
+# Tries sysfs first, falls back to ip command with regex extraction.
+# Outputs:
+#   Writes MAC address to stdout (or 'unknown' if not found)
+# Returns:
+#   0 always
+#######################################
 get_mac_address() {
     local mac_file="/sys/class/net/wlan0/address"
     if [[ -r "$mac_file" ]]; then
         cat "$mac_file"
     elif command -v ip &>/dev/null; then
+        # Pure bash: extract MAC address using regex
         local ip_output
         ip_output=$(ip link show wlan0 2>/dev/null)
         if [[ $ip_output =~ link/ether[[:space:]]+([0-9a-f:]+) ]]; then
@@ -34,77 +84,120 @@ get_mac_address() {
     fi
 }
 
-MAC_ADDRESS=""
 MAC_ADDRESS=$(get_mac_address)
 readonly MAC_ADDRESS
 
+#-------------------------------------------------------------------------------
+# Functions
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# TRAP HANDLERS
-#===============================================================================
-cleanup() {
-    local exit_code=${1:-$?}
-    exit "$exit_code"
+#######################################
+# Log message with optional web upload.
+# Arguments:
+#   $1 - Message to log
+#   $2 - Upload to web (yes/no, default: yes)
+# Returns:
+#   0 always
+#######################################
+log_message() {
+    # Don't log to web if no_web is specified
+    if [[ ${2:-yes} == "yes" ]]; then
+        log_to_web "CLEANUP" "$1"
+    fi
 }
 
+#######################################
+# Upload log message to server with retry logic.
+# Also updates status.tmp with last activity timestamp.
+# Globals:
+#   MAC_ADDRESS
+#   BASE_URL
+# Arguments:
+#   $1 - Status label (e.g., CLEANUP, ERROR)
+#   $2 - Log message content
+# Returns:
+#   0 on successful upload, 1 after 2 failed attempts
+#######################################
+log_to_web() {
+    local status="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(TZ=Asia/Kuwait date)
+    local log_data="[ $status ] $message | Device: $MAC_ADDRESS | $timestamp"
+    local attempt=0
 
-err_trap() {
-    local exit_code=$? line="${BASH_LINENO[0]}" func="${FUNCNAME[1]:-main}"
-    log_web "ERROR" "${func}():${line} failed (exit $exit_code)"
-}
-
-
-trap 'cleanup $?' EXIT INT TERM
-trap err_trap ERR
-
-
-#===============================================================================
-# LOGGING
-#===============================================================================
-log() {
-    printf '[%s] [%s] %s\n' "$(date '+%H:%M:%S')" "$1" "$2"
-}
-
-
-log_web() {
-    local status="$1" message="$2"
-    local timestamp log_data attempt
-
-    timestamp=$(TZ=Asia/Kuwait date '+%d/%m/%Y %H:%M:%S')
-    log_data="[ $status ] $message | Device: $MAC_ADDRESS | $timestamp"
-
-    for attempt in {1..2}; do
-        if curl -sf --max-time 5 --data-urlencode "file=log/log.txt" \
-            --data-urlencode "data=$log_data" "${BASE_URL}/storage.php" >/dev/null 2>&1; then
-
-            # Update status.tmp to show last activity
+    while ((attempt < 2)); do
+        if curl --silent --data "file=log/log.txt&data=$log_data" "$BASE_URL/storage.php" -m 5; then
+            # Also update status.tmp on server to show last activity
             local unix_time
             printf -v unix_time '%(%s)T' -1
-            curl -sf --max-time 1 --data-urlencode "file=tmp/status.tmp" \
-                --data-urlencode "data=active $unix_time" \
-                "${BASE_URL}/storage.php" >/dev/null 2>&1 || :
-
-            [[ $attempt -gt 1 ]] && log "INFO" "Web log succeeded on attempt $attempt"
+            curl --silent --data "file=tmp/status.tmp&data=active $unix_time" "$BASE_URL/storage.php" -m 1 &>/dev/null
             return 0
         fi
+        ((attempt++))
         sleep 1
     done
 
     return 1
 }
 
+#######################################
+# Clean up duplicate files matching a pattern.
+# Uses mapfile for efficient file collection.
+# Arguments:
+#   $1 - Directory path to search
+#   $2 - File pattern to match (e.g., *.jpg)
+# Returns:
+#   0 always
+#######################################
+cleanup_duplicates() {
+    local dir="$1"
+    local pattern="$2"
 
-#===============================================================================
-# FUNCTIONS
-#===============================================================================
+    if [[ -d $dir ]]; then
+        local -a dup_files
+        mapfile -t dup_files < <(find "$dir" -type f -name "${pattern}.*[0-9]")
+        local count=${#dup_files[@]}
+        if [[ $count -gt 0 ]]; then
+            log_message "Cleaning up $count duplicate files in $dir matching $pattern" "no"
+            find "$dir" -type f -name "${pattern}.*[0-9]" -delete
+        else
+            log_message "No duplicate files found in $dir matching $pattern" "no"
+        fi
+    else
+        log_message "Directory $dir does not exist, skipping duplicate cleanup" "no"
+    fi
+}
 
-# Get disk usage percentage (Pure Bash)
+#-------------------------------------------------------------------------------
+# Main cleanup operations
+#-------------------------------------------------------------------------------
+
+# Start cleanup operations
+log_message "Starting cleanup operations" "yes"
+
+# Safe cleanup of temporary files
+log_message "Cleaning temporary files" "no"
+find /tmp -name "*.tmp" -type f -mtime +7 -delete
+find /tmp -name "*.log" -type f -mtime +7 -delete
+
+# Clean up duplicate files in /var/www/html
+cleanup_duplicates "/var/www/html" "*.jpg"
+cleanup_duplicates "/var/www/html" "*.css"
+cleanup_duplicates "/var/www/html" "*.js"
+cleanup_duplicates "/var/www/html" "*.ico"
+
+#######################################
+# Get root filesystem disk usage percentage.
+# Pure Bash implementation parsing df output.
+# Outputs:
+#   Writes usage percentage to stdout (without % sign)
+# Returns:
+#   0 always
+#######################################
 get_disk_usage() {
     local df_output line_count=0 usage_line
-    df_output=$(df -h / 2>/dev/null || echo "")
-
-    [[ -z $df_output ]] && { echo "0"; return; }
-
+    df_output=$(df -h /)
     while IFS= read -r line; do
         ((line_count++))
         if [[ $line_count -eq 2 ]]; then
@@ -116,125 +209,67 @@ get_disk_usage() {
     # Extract 5th field (Usage%) and remove % sign
     local -a fields
     read -ra fields <<< "$usage_line"
-    local usage="${fields[4]:-0%}"
+    local usage="${fields[4]}"
     echo "${usage%\%}"
 }
 
+DISK_USAGE=$(get_disk_usage)
+if [[ $DISK_USAGE -gt 80 ]]; then
+    log_message "Disk usage high ($DISK_USAGE%), performing additional cleanup" "yes"
 
-# Clean up duplicate files using mapfile
-cleanup_duplicates() {
-    local dir="$1" pattern="$2"
+    # Find and remove large files
+    log_message "Removing large files over 10MB older than 3 days" "no"
+    find /tmp -type f -size +10M -mtime +3 -delete
 
-    if [[ ! -d $dir ]]; then
-        return 0
-    fi
+    # System cleanup
+    log_message "Cleaning system logs" "no"
+    sudo journalctl --vacuum-time=2d
 
-    local -a dup_files
-    mapfile -t dup_files < <(find "$dir" -type f -name "${pattern}.*[0-9]" 2>/dev/null || :)
+    # Clear package cache
+    log_message "Clearing apt cache" "no"
+    sudo apt-get clean
 
-    local count=${#dup_files[@]}
-    if [[ $count -gt 0 ]]; then
-        find "$dir" -type f -name "${pattern}.*[0-9]" -delete 2>/dev/null || :
-        log "INFO" "Cleaned $count duplicate files in $dir"
-    fi
-}
+    # New disk usage after cleanup
+    NEW_DISK_USAGE=$(get_disk_usage)
+    log_message "Disk usage after cleanup: $NEW_DISK_USAGE%" "yes"
+else
+    log_message "Disk usage normal ($DISK_USAGE%), no additional cleanup needed" "no"
+fi
 
+# Check for broken symlinks (using mapfile for efficiency)
+log_message "Checking for broken symlinks" "no"
+mapfile -t BROKEN_LINK_LIST < <(find /var/www/html -type l -xtype l)
+BROKEN_LINKS=${#BROKEN_LINK_LIST[@]}
+if [[ $BROKEN_LINKS -gt 0 ]]; then
+    log_message "Found $BROKEN_LINKS broken symlinks, removing" "yes"
+    find /var/www/html -type l -xtype l -delete
+fi
 
-# Restart process if not running
+#######################################
+# Restart a process if not running.
+# Checks if process exists and restarts from /tmp if found.
+# Arguments:
+#   $1 - Process name (without .sh extension)
+# Returns:
+#   0 always
+#######################################
 restart_process() {
     local process=$1
-
-    if ! pgrep -f "${process}.sh" >/dev/null 2>&1; then
-        log "WARN" "${process}.sh not running, restarting"
-        log_web "RESTART" "${process}.sh restarted"
-
+    if ! pgrep -f "${process}.sh" >/dev/null; then
+        log_message "${process}.sh is not running, restarting" "yes"
         if [[ -f /tmp/${process}.sh ]]; then
             /tmp/"${process}.sh" > /tmp/"${process}.log" 2>&1 &
-            sleep 0.1  # Service startup delay
         else
-            log "ERROR" "Cannot restart ${process}.sh - file not found"
+            log_message "Cannot restart ${process}.sh - file not found" "yes"
         fi
     fi
 }
 
+# Restart all processes in parallel
+for process in tunel tunel2 tunel3 tunel4 sync main live; do
+    restart_process "$process" &
+done
+wait
 
-#===============================================================================
-# MAIN
-#===============================================================================
-main() {
-    log "INFO" "=== CLEANUP SERVICE STARTED ==="
-    log_web "INFO" "Cleanup Service Started"
-
-    # Safe cleanup of temporary files
-    log "INFO" "Cleaning old temporary files"
-    find /tmp -name "*.tmp" -type f -mtime +7 -delete 2>/dev/null || :
-    find /tmp -name "*.log" -type f -mtime +7 -delete 2>/dev/null || :
-
-    # Clean up duplicate files in parallel
-    cleanup_duplicates "/var/www/html" "*.jpg" &
-    cleanup_duplicates "/var/www/html" "*.css" &
-    cleanup_duplicates "/var/www/html" "*.js" &
-    cleanup_duplicates "/var/www/html" "*.ico" &
-    wait
-
-    # Check disk space
-    local disk_usage
-    disk_usage=$(get_disk_usage)
-
-    log "INFO" "Disk usage: ${disk_usage}%"
-
-    if [[ $disk_usage -gt 80 ]]; then
-        log "WARN" "Disk usage high (${disk_usage}%), performing deep cleanup"
-        log_web "WARN" "Disk High: ${disk_usage}%"
-
-        # Remove large old files
-        find /tmp -type f -size +10M -mtime +3 -delete 2>/dev/null || :
-
-        # System cleanup
-        if command -v journalctl &>/dev/null; then
-            sudo journalctl --vacuum-time=2d 2>/dev/null || :
-        fi
-
-        # Clear apt cache
-        if command -v apt-get &>/dev/null; then
-            sudo apt-get clean 2>/dev/null || :
-        fi
-
-        # Check new disk usage
-        local new_disk_usage
-        new_disk_usage=$(get_disk_usage)
-        log "INFO" "Disk usage after cleanup: ${new_disk_usage}%"
-        log_web "INFO" "Disk After Cleanup: ${new_disk_usage}%"
-    fi
-
-    # Check for broken symlinks
-    local -a broken_links
-    mapfile -t broken_links < <(find /var/www/html -type l -xtype l 2>/dev/null || :)
-
-    local broken_count=${#broken_links[@]}
-    if [[ $broken_count -gt 0 ]]; then
-        log "WARN" "Found $broken_count broken symlinks, removing"
-        log_web "WARN" "Broken Symlinks: $broken_count"
-        find /var/www/html -type l -xtype l -delete 2>/dev/null || :
-    fi
-
-    # Restart critical processes in parallel
-    log "INFO" "Checking critical processes"
-
-    restart_process "tunel" &
-    restart_process "tunel2" &
-    restart_process "tunel3" &
-    restart_process "tunel4" &
-    restart_process "sync" &
-    restart_process "main" &
-    restart_process "live" &
-    wait
-
-    log "INFO" "Cleanup completed successfully"
-    log_web "OK" "Cleanup Completed"
-
-    exit 0
-}
-
-
-main "$@"
+log_message "Cleanup operations completed successfully" "yes"
+exit 0

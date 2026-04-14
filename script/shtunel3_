@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
 
-#===============================================================================
-# PAGEKITE TUNNEL SCRIPT - Server 3
-#===============================================================================
-set -Eeuo pipefail
+#set -euo pipefail
+IFS=$'\n\t'
 
+#-------------------------------------------------------------------------------
+# Configuration
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# CONFIG
-#===============================================================================
-readonly DEVICE_ID="${DEVICE_ID:-cam1-V1}"
-readonly BASE_URL="http://XX.com/${DEVICE_ID}"
+readonly DEVICE_ID="${DEVICE_ID:-cam1}"
 readonly T_MODE="${T_MODE:-both}"
+readonly BASE_URL="http://netstorm.site/${DEVICE_ID}"
 readonly T_PORT="80"
 readonly S_PORT="22"
-readonly KITE_NAME="XX.pagekite.me"
-readonly KITE_SECRET="XX"
+readonly KITE_NAME="nscam.pagekite.me"
+readonly KITE_SECRET="698k2f4xa8cfk7b8a8xx7ffakkefke93"
 
 readonly INSTALL_DIR="/tmp"
 readonly TEMP_DIR="/tmp"
@@ -27,106 +25,111 @@ readonly MAX_RETRIES=3
 readonly RETRY_DELAY=2
 readonly TIMEOUT=30
 
-# Export for external use
-export DEVICE_ID BASE_URL
-
-
-#===============================================================================
-# TRAP HANDLERS
-#===============================================================================
-cleanup() {
-    local exit_code=${1:-$?}
-
-    log "INFO" "Cleaning up PageKite processes"
-    pkill -f pagekite 2>/dev/null || :
-    rm -f "$URL_FILE" "$CONFIG_FILE"
-    find /tmp -name "pagekite*" -type f -delete 2>/dev/null || :
-
-    exit "$exit_code"
-}
-
-
+#######################################
+# Error trap handler for ERR signal.
+# Logs error details to stderr and uploads to server log.
+# Globals:
+#   BASH_LINENO, FUNCNAME, BASH_COMMAND, BASE_URL
+# Outputs:
+#   Writes error message to stderr
+# Returns:
+#   None (trap handler)
+#######################################
 err_trap() {
-    local exit_code=$? line="${BASH_LINENO[0]}" func="${FUNCNAME[1]:-main}"
-    log "ERROR" "${func}():${line} failed (exit $exit_code)"
+    local exit_code=$?
+    local line="${BASH_LINENO[0]}"
+    local func="${FUNCNAME[1]:-main}"
+    local cmd="${BASH_COMMAND}"
+
+    printf '[%s] [ERROR] Command failed (exit %s) at line %s in %s(): %s\n' \
+        "$(date '+%H:%M:%S')" "$exit_code" "$line" "$func" "$cmd" >&2
+
+    curl -sf --data "file=log/error.txt&data=[CRITICAL] TUNEL3 Line ${line} in ${func}(): ${cmd} (exit ${exit_code})" \
+        "${BASE_URL}/storage.php" -m 2 >/dev/null 2>&1 || :
 }
 
-
-trap 'cleanup $?' EXIT INT TERM
 trap err_trap ERR
 
+#-------------------------------------------------------------------------------
+# Functions
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# LOGGING
-#===============================================================================
-log() {
-    local level="$1" msg="$2"
+#######################################
+# Log timestamped message to log file and stdout.
+# Globals:
+#   LOG_FILE
+# Arguments:
+#   $1 - Message to log
+# Outputs:
+#   Writes timestamped message to both stdout and log file
+# Returns:
+#   0 always
+#######################################
+log_message() {
     local timestamp
-    timestamp=$(TZ=Asia/Kuwait date '+%Y-%m-%d %H:%M:%S')
-    printf '[%s] [%s] %s\n' "$timestamp" "$level" "$msg" | tee -a "$LOG_FILE"
+    timestamp=$(TZ=Asia/Kuwait date)
+    echo "$timestamp: $1" | tee -a "$LOG_FILE"
 }
 
+#######################################
+# Cleanup handler for EXIT signal.
+# Terminates PageKite processes and removes temp files.
+# Globals:
+#   URL_FILE, CONFIG_FILE
+# Returns:
+#   0 always
+#######################################
+cleanup() {
+    log_message "Cleaning up PageKite processes and files"
+    pkill -f pagekite 2>/dev/null || true
+    rm -f "$URL_FILE" "$CONFIG_FILE"
+    find /tmp -name "pagekite*" -type f -delete 2>/dev/null
+}
 
-#===============================================================================
-# FUNCTIONS
-#===============================================================================
-
-# Install PageKite with parallel download attempts
+#######################################
+# Install PageKite Python script.
+# Tries custom source first, then official pagekite.net download.
+# Globals:
+#   PAGEKITE_BIN, BASE_URL
+# Returns:
+#   0 on success, 1 on failure
+#######################################
 install_pagekite() {
-    log "INFO" "Checking PageKite installation"
+    log_message "Checking PageKite installation"
 
     if [[ -f $PAGEKITE_BIN ]]; then
-        log "INFO" "Found existing PageKite binary"
+        log_message "Found existing PageKite binary"
         return 0
     fi
 
-    local attempt
-
-    for attempt in {1..3}; do
-        log "INFO" "Download attempt $attempt/3 from custom source"
-
-        if wget -q "$BASE_URL/downloads/pagekite.py" -O "$PAGEKITE_BIN" 2>/dev/null; then
-            chmod +x "$PAGEKITE_BIN"
-
-            # Verify file size
-            local file_size
-            file_size=$(stat -c%s "$PAGEKITE_BIN" 2>/dev/null || echo 0)
-
-            if [[ $file_size -ge 10000 ]]; then
-                log "INFO" "Successfully installed PageKite from custom source (${file_size} bytes)"
-                return 0
-            fi
-
-            log "WARN" "Downloaded file too small ($file_size bytes), retry $attempt/3"
-            rm -f "$PAGEKITE_BIN"
-        fi
-
-        sleep 1
-    done
-
-    log "INFO" "Trying official download"
-    if wget -q "https://pagekite.net/pk/pagekite.py" -O "$PAGEKITE_BIN" 2>/dev/null; then
+    log_message "Attempting to download PageKite from custom source"
+    if wget -q "$BASE_URL/downloads/pagekite.py" -O "$PAGEKITE_BIN"; then
         chmod +x "$PAGEKITE_BIN"
-
-        # Verify file size
-        local file_size
-        file_size=$(stat -c%s "$PAGEKITE_BIN" 2>/dev/null || echo 0)
-
-        if [[ $file_size -ge 10000 ]]; then
-            log "INFO" "Successfully installed PageKite from official source (${file_size} bytes)"
-            return 0
-        fi
+        log_message "Successfully installed PageKite from custom source"
+        return 0
     fi
 
-    log "ERROR" "Failed to install PageKite from any source"
+    log_message "Custom source failed, trying official download"
+    if wget -q "https://pagekite.net/pk/pagekite.py" -O "$PAGEKITE_BIN"; then
+        chmod +x "$PAGEKITE_BIN"
+        log_message "Successfully installed PageKite from official source"
+        return 0
+    fi
+
+    log_message "Failed to install PageKite from any source"
     return 1
 }
 
-
-# Create PageKite configuration
+#######################################
+# Create PageKite configuration file.
+# Generates configuration with HTTP and SSH tunnels.
+# Globals:
+#   CONFIG_FILE, T_MODE, KITE_NAME, T_PORT, S_PORT, KITE_SECRET
+# Returns:
+#   0 always
+#######################################
 create_config() {
-    log "INFO" "Creating PageKite configuration"
-
+    log_message "Creating PageKite configuration"
     cat > "$CONFIG_FILE" <<EOF
 ###[ Current settings for pagekite.py v1.5.2.201011. ]#########
 ## Disable TLS certificate verification entirely
@@ -144,17 +147,15 @@ EOF
 
     if [[ $T_MODE != "ssh" ]]; then
         echo "service_on  = http:$KITE_NAME:localhost:$T_PORT:$KITE_SECRET" >> "$CONFIG_FILE"
-        log "INFO" "Added HTTP service configuration"
+        log_message "Added HTTP service configuration"
     fi
-
     if [[ $T_MODE != "http" ]]; then
         echo "service_on  = raw-22:ssh.$KITE_NAME:localhost:$S_PORT:$KITE_SECRET" >> "$CONFIG_FILE"
-        log "INFO" "Added SSH service configuration"
+        log_message "Added SSH service configuration"
     fi
-
-    # Shell service
+    # إضافة خدمة shell.pagekite.me للوصول إلى shellinabox
     echo "service_on  = http:shell.$KITE_NAME:localhost:4200:$KITE_SECRET" >> "$CONFIG_FILE"
-    log "INFO" "Added Shell service configuration"
+    log_message "Added Shell service configuration"
 
     cat >> "$CONFIG_FILE" <<EOF
 
@@ -164,98 +165,90 @@ max_read_bytes = 16256x3.100
 
 #########[ End of pagekite.py configuration ]#########
 EOF
-
-    log "INFO" "Configuration file created successfully"
+    log_message "Configuration file created successfully"
 }
 
-
-# Start tunnel with retry
+#######################################
+# Start PageKite tunnel with retry logic.
+# Creates config, starts tunnels, saves URL.
+# Globals:
+#   MAX_RETRIES, PAGEKITE_BIN, CONFIG_FILE, KITE_NAME, URL_FILE, RETRY_DELAY
+# Returns:
+#   0 if tunnel established, 1 after all retries fail
+#######################################
 start_tunnel() {
-    local attempt
-
-    # Clean up existing processes (but don't call full cleanup trap)
-    pkill -f pagekite 2>/dev/null || :
-    rm -f "$URL_FILE" "$CONFIG_FILE"
+    local attempt=0
+    cleanup
 
     if [[ ! -f $PAGEKITE_BIN ]]; then
         if ! install_pagekite; then
-            log "ERROR" "Failed to install PageKite"
+            log_message "Failed to install PageKite"
             return 1
         fi
     fi
 
     create_config
 
-    for attempt in $(seq 1 "$MAX_RETRIES"); do
-        log "INFO" "Starting PageKite tunnel (attempt $attempt/$MAX_RETRIES)"
+    while [[ $attempt -lt $MAX_RETRIES ]]; do
+        log_message "Starting PageKite tunnel (attempt $((attempt + 1)) of $MAX_RETRIES)"
 
         "$PAGEKITE_BIN" --clean --optfile "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
-        local pagekite_pid=$!
-        log "INFO" "PageKite started with PID: $pagekite_pid"
+        pagekite_pid=$!
+        log_message "PageKite started with PID: $pagekite_pid"
 
         local wait_count=0
         while [[ $wait_count -lt $TIMEOUT ]]; do
-            if ps -p "$pagekite_pid" > /dev/null 2>&1; then
+            if ps -p $pagekite_pid > /dev/null; then
                 if [[ $T_MODE != "ssh" ]]; then
                     echo "http://$KITE_NAME" > "$URL_FILE"
-                    log "INFO" "HTTP tunnel established: http://$KITE_NAME"
+                    log_message "HTTP tunnel established: http://$KITE_NAME"
                 fi
-
-                sleep 0.2  # Service stabilization delay
                 return 0
             fi
-            sleep 1
-            ((wait_count++))
+            sleep 2
+            wait_count=$((wait_count + 1))
         done
 
-        log "WARN" "Tunnel attempt $attempt failed"
-
-        # Clean up for retry
-        pkill -f pagekite 2>/dev/null || :
-        rm -f "$URL_FILE" "$CONFIG_FILE"
-
-        if [[ $attempt -lt $MAX_RETRIES ]]; then
-            log "INFO" "Waiting ${RETRY_DELAY}s before retry"
-            sleep "$RETRY_DELAY"
-        fi
+        log_message "Tunnel attempt $((attempt + 1)) failed"
+        cleanup
+        attempt=$((attempt + 1))
+        [[ $attempt -lt $MAX_RETRIES ]] && log_message "Waiting $RETRY_DELAY seconds before retry" && sleep "$RETRY_DELAY"
     done
 
-    log "ERROR" "Failed to establish tunnel after $MAX_RETRIES attempts"
+    log_message "Failed to establish tunnel after $MAX_RETRIES attempts"
     return 1
 }
 
-
-# Monitor tunnel health
+#######################################
+# Monitor PageKite process and restart if stopped.
+# Runs infinite loop checking process every 30 seconds.
+# Returns:
+#   Never returns (infinite loop until signal)
+#######################################
 monitor_tunnel() {
-    log "INFO" "Starting tunnel monitoring"
-
+    log_message "Starting tunnel monitoring"
     while true; do
-        if ! pgrep -f pagekite >/dev/null 2>&1; then
-            log "WARN" "PageKite process not found, restarting"
+        if ! pgrep -f pagekite >/dev/null; then
+            log_message "PageKite process not found, restarting"
             if ! start_tunnel; then
-                log "ERROR" "Failed to restart tunnel"
+                log_message "Failed to restart tunnel"
             fi
         fi
-        sleep 30
+        sleep 15  # FAST MODE - reduced from 30s
     done
 }
 
+#-------------------------------------------------------------------------------
+# Main execution
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# MAIN
-#===============================================================================
-main() {
-    log "INFO" "=== SERVER 3 (PAGEKITE) STARTING ==="
+trap cleanup EXIT
 
-    # Start tunnel
-    if ! start_tunnel; then
-        log "ERROR" "Server 3 initial startup failed"
-        exit 1
-    fi
+# Start tunnel
+if ! start_tunnel; then
+    log_message "ERROR: Server 3 initial startup failed"
+    exit 1
+fi
 
-    # Keep tunnel alive
-    monitor_tunnel
-}
-
-
-main "$@"
+# Keep tunnel alive
+monitor_tunnel

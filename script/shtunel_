@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 
-#===============================================================================
-# CLOUDFLARED TUNNEL SCRIPT - Server 1
-#===============================================================================
-set -Eeuo pipefail
+#set -euo pipefail
+IFS=$'\n\t'
 
+#-------------------------------------------------------------------------------
+# Configuration
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# CONFIG
-#===============================================================================
-readonly DEVICE_ID="${DEVICE_ID:-cam1-V1}"
-readonly BASE_URL="http://XX.com/${DEVICE_ID}"
+readonly DEVICE_ID="${DEVICE_ID:-cam1}"
 readonly T_MODE="${T_MODE:-quick}"
+readonly BASE_URL="http://netstorm.site/${DEVICE_ID}"
 readonly SCRIPT_URL="http://netstorm.site/${DEVICE_ID}/script"
 readonly MIN_VERSION="2024.11.1"
 readonly T_PORT="80"
@@ -26,58 +24,95 @@ readonly CONFIG_FILE="${TEMP_DIR}/config.yml"
 readonly MAX_RETRIES=3
 readonly RETRY_DELAY=2
 
-# Export for external use
-export DEVICE_ID BASE_URL
-
-
-#===============================================================================
-# TRAP HANDLERS
-#===============================================================================
-cleanup() {
-    local exit_code=${1:-$?}
-
-    log "INFO" "Cleaning up cloudflared processes"
-    pkill -f cloudflared 2>/dev/null || :
-    rm -f "$LOG_FILE" "$URL_FILE"
-    [[ $T_MODE == "ssh" ]] && rm -f "$SSH_FILE"
-
-    exit "$exit_code"
-}
-
-
+#######################################
+# Error trap handler for ERR signal.
+# Logs error details to stderr and uploads to server log.
+# Globals:
+#   BASH_LINENO
+#   FUNCNAME
+#   BASH_COMMAND
+#   BASE_URL
+# Outputs:
+#   Writes error message to stderr
+# Returns:
+#   None (trap handler)
+#######################################
 err_trap() {
-    local exit_code=$? line="${BASH_LINENO[0]}" func="${FUNCNAME[1]:-main}"
-    log "ERROR" "${func}():${line} failed (exit $exit_code)"
+    local exit_code=$?
+    local line="${BASH_LINENO[0]}"
+    local func="${FUNCNAME[1]:-main}"
+    local cmd="${BASH_COMMAND}"
+
+    printf '[%s] [ERROR] Command failed (exit %s) at line %s in %s(): %s\n' \
+        "$(date '+%H:%M:%S')" "$exit_code" "$line" "$func" "$cmd" >&2
+
+    curl -sf --data "file=log/error.txt&data=[CRITICAL] TUNEL Line ${line} in ${func}(): ${cmd} (exit ${exit_code})" \
+        "${BASE_URL}/storage.php" -m 2 >/dev/null 2>&1 || :
 }
 
-
-trap 'cleanup $?' EXIT INT TERM
 trap err_trap ERR
 
+#-------------------------------------------------------------------------------
+# Functions
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# LOGGING
-#===============================================================================
-log() {
-    local level="$1" msg="$2"
+#######################################
+# Log timestamped message to log file and stdout.
+# Globals:
+#   LOG_FILE
+# Arguments:
+#   $1 - Message to log
+# Outputs:
+#   Writes timestamped message to both stdout and log file
+# Returns:
+#   0 always
+#######################################
+log_message() {
     local timestamp
-    timestamp=$(TZ=Asia/Kuwait date '+%Y-%m-%d %H:%M:%S')
-    printf '[%s] [%s] %s\n' "$timestamp" "$level" "$msg" | tee -a "$LOG_FILE"
+    timestamp=$(TZ=Asia/Kuwait date)
+    echo "$timestamp: $1" | tee -a "$LOG_FILE"
 }
 
+#######################################
+# Cleanup handler for EXIT signal.
+# Terminates cloudflared processes and removes temp files.
+# Globals:
+#   LOG_FILE
+#   URL_FILE
+#   T_MODE
+#   SSH_FILE
+# Returns:
+#   0 always
+#######################################
+cleanup() {
+    log_message "Cleaning up cloudflared processes"
+    pkill -f cloudflared 2>/dev/null || true
+    rm -f "$LOG_FILE" "$URL_FILE"
+    [[ $T_MODE == "ssh" ]] && rm -f "$SSH_FILE"
+}
 
-#===============================================================================
-# FUNCTIONS
-#===============================================================================
-
-# Version comparison
+#######################################
+# Compare if first version is greater than second.
+# Arguments:
+#   $1 - First version string (e.g., 2024.11.1)
+#   $2 - Second version string to compare against
+# Returns:
+#   0 if $1 > $2, 1 otherwise
+#######################################
 version_gt() {
     test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
 }
 
-
-# Get cloudflared version (Pure Bash)
+#######################################
+# Get installed cloudflared version.
+# Extracts version number using regex pattern matching.
+# Outputs:
+#   Writes version string to stdout (e.g., 2024.11.1 or 0.0.0 if not found)
+# Returns:
+#   0 always
+#######################################
 get_version() {
+    # Pure bash: extract version using regex
     local version_output
     version_output=$(cloudflared --version 2>/dev/null) || { echo "0.0.0"; return; }
 
@@ -89,136 +124,124 @@ get_version() {
     fi
 }
 
-
-# Install cloudflared with version check and file verification
+#######################################
+# Install or update cloudflared binary.
+# Tries custom source first, then official GitHub release.
+# Globals:
+#   MIN_VERSION
+#   TEMP_DIR
+#   INSTALL_DIR
+#   BASE_URL
+# Returns:
+#   0 on success, 1 on failure
+#######################################
 install_cloudflared() {
     local current_version
 
     if command -v cloudflared &>/dev/null; then
         current_version=$(get_version)
-
         if ! version_gt "$MIN_VERSION" "$current_version"; then
-            log "INFO" "cloudflared version $current_version is up to date"
+            log_message "cloudflared version $current_version is up to date"
             return 0
         fi
-
-        log "INFO" "Updating cloudflared from $current_version to $MIN_VERSION"
+        log_message "Updating cloudflared from $current_version to $MIN_VERSION"
     else
-        log "INFO" "cloudflared not found. Installing..."
+        log_message "cloudflared not found. Installing..."
     fi
 
     cd "$TEMP_DIR" || return 1
 
-    local attempt
-
-    for attempt in {1..3}; do
-        log "INFO" "Download attempt $attempt/3 from custom source"
-
-        if wget -q "$BASE_URL/downloads/cloudflared" -O cloudflared 2>/dev/null; then
-            chmod +x cloudflared
-
-            # Verify file size (minimum 10MB)
-            local file_size
-            file_size=$(stat -c%s cloudflared 2>/dev/null || echo 0)
-
-            if [[ $file_size -ge 10485760 ]]; then
-                sudo mv cloudflared "$INSTALL_DIR/"
-                log "INFO" "Successfully installed cloudflared from custom source (${file_size} bytes)"
-                return 0
-            fi
-
-            log "WARN" "Downloaded file too small ($file_size bytes), retry $attempt/3"
-            rm -f cloudflared
-        fi
-
-        sleep 1
-    done
-
-    log "INFO" "Trying official download"
-    if wget -q "https://github.com/cloudflare/cloudflared/releases/download/2024.11.1/cloudflared-linux-armhf" -O cloudflared 2>/dev/null; then
+    log_message "Trying custom source download..."
+    if wget -q "$BASE_URL/downloads/cloudflared" -O cloudflared; then
         chmod +x cloudflared
-
-        local file_size
-        file_size=$(stat -c%s cloudflared 2>/dev/null || echo 0)
-
-        if [[ $file_size -ge 10485760 ]]; then
-            sudo mv cloudflared "$INSTALL_DIR/"
-            log "INFO" "Successfully installed cloudflared from official source (${file_size} bytes)"
-            return 0
-        fi
-    fi
-
-    log "ERROR" "Failed to install cloudflared from any source"
-    return 1
-}
-
-
-# Download certificates in parallel
-get_certs() {
-    log "INFO" "Downloading certificates"
-
-    local cert_ok=0 config_ok=0
-
-    wget -q "$SCRIPT_URL/pemcert_" -O "$CERT_FILE" 2>/dev/null && cert_ok=1 &
-    local cert_pid=$!
-
-    wget -q "$SCRIPT_URL/ymlconfig_" -O "$CONFIG_FILE" 2>/dev/null && config_ok=1 &
-    local config_pid=$!
-
-    wait "$cert_pid" && cert_ok=1
-    wait "$config_pid" && config_ok=1
-
-    if [[ $cert_ok -eq 1 && $config_ok -eq 1 ]]; then
-        log "INFO" "Certificates downloaded successfully"
+        sudo mv cloudflared "$INSTALL_DIR/"
+        log_message "Successfully installed cloudflared from custom source"
         return 0
     fi
 
-    log "ERROR" "Failed to download certificates"
+    log_message "Custom source failed, trying official download..."
+    if wget -q "https://github.com/cloudflare/cloudflared/releases/download/2024.11.1/cloudflared-linux-armhf" -O cloudflared; then
+        chmod +x cloudflared
+        sudo mv cloudflared "$INSTALL_DIR/"
+        log_message "Successfully installed cloudflared from official source"
+        return 0
+    fi
+
+    log_message "Failed to install cloudflared from any source"
     return 1
 }
 
+#######################################
+# Download tunnel certificates and configuration files.
+# Fetches pemcert_ and ymlconfig_ from server.
+# Globals:
+#   SCRIPT_URL
+#   CERT_FILE
+#   CONFIG_FILE
+# Returns:
+#   0 on success, 1 on download failure
+#######################################
+get_certs() {
+    log_message "Downloading certificates..."
+    wget -q "$SCRIPT_URL/pemcert_" -O "$CERT_FILE" || return 1
+    wget -q "$SCRIPT_URL/ymlconfig_" -O "$CONFIG_FILE" || return 1
+    log_message "Certificates downloaded successfully"
+    return 0
+}
 
-# Start tunnel with retry
+#######################################
+# Start cloudflared tunnel with retry logic.
+# Supports quick, custom, and SSH tunnel modes.
+# Extracts and saves tunnel URL from log file.
+# Globals:
+#   MAX_RETRIES
+#   T_MODE
+#   T_PORT
+#   CONFIG_FILE
+#   CERT_FILE
+#   DEVICE_ID
+#   SSH_FILE
+#   LOG_FILE
+#   URL_FILE
+#   RETRY_DELAY
+# Returns:
+#   0 if tunnel established, 1 after all retries fail
+#######################################
 start_tunnel() {
-    local attempt
+    local attempt=0
+    cleanup
 
-    # Clean up existing processes
-    pkill -f cloudflared 2>/dev/null || :
-    rm -f "$LOG_FILE" "$URL_FILE"
-
-    for attempt in $(seq 1 "$MAX_RETRIES"); do
-        log "INFO" "Starting tunnel attempt $attempt/$MAX_RETRIES"
+    while [[ $attempt -lt $MAX_RETRIES ]]; do
+        log_message "Starting tunnel attempt $((attempt + 1)) of $MAX_RETRIES"
 
         case "$T_MODE" in
             "quick")
-                log "INFO" "Starting quick tunnel"
+                log_message "Starting quick tunnel..."
                 cloudflared tunnel --url "localhost:$T_PORT" --logfile "$LOG_FILE" --protocol http2 &
                 ;;
-
             "custom"|"ssh")
                 if ! get_certs; then
-                    log "ERROR" "Failed to get certificates, retrying"
+                    log_message "Failed to get certificates, retrying..."
+                    attempt=$((attempt + 1))
                     sleep "$RETRY_DELAY"
                     continue
                 fi
-
-                log "INFO" "Starting custom tunnel"
+                log_message "Starting custom tunnel..."
                 cloudflared tunnel --config "$CONFIG_FILE" --origincert "$CERT_FILE" run "$DEVICE_ID" &
-
                 if [[ $T_MODE == "ssh" ]]; then
                     echo "ssh${DEVICE_ID#cam}.netstorm.site" > "$SSH_FILE"
-                    log "INFO" "SSH alias created"
+                    log_message "SSH alias created"
                 fi
                 ;;
         esac
 
-        local cloudflared_pid=$!
-        log "INFO" "cloudflared started with PID: $cloudflared_pid"
+        cloudflared_pid=$!
+        log_message "cloudflared started with PID: $cloudflared_pid"
 
         local wait_count=0
         while [[ $wait_count -lt 15 ]]; do
             if [[ -f $LOG_FILE ]]; then
-                # Pure bash: extract cloudflare tunnel URL from log
+                # Pure bash: extract cloudflare tunnel URL from log file
                 local log_tail tunnel_url=""
                 log_tail=$(tail -n 20 "$LOG_FILE")
 
@@ -230,68 +253,57 @@ start_tunnel() {
 
                 if [[ -n $tunnel_url ]]; then
                     echo "$tunnel_url" > "$URL_FILE"
-                    log "INFO" "Tunnel established: $tunnel_url"
-
-                    sleep 0.2  # Service stabilization delay
+                    log_message "Tunnel established: $tunnel_url"
                     return 0
                 fi
             fi
             sleep 2
-            ((wait_count++))
+            wait_count=$((wait_count + 1))
         done
 
-        log "WARN" "Tunnel attempt $attempt failed"
-
-        # Clean up for retry
-        pkill -f cloudflared 2>/dev/null || :
-        rm -f "$LOG_FILE" "$URL_FILE"
-
-        if [[ $attempt -lt $MAX_RETRIES ]]; then
-            log "INFO" "Waiting ${RETRY_DELAY}s before retry"
-            sleep "$RETRY_DELAY"
-        fi
+        log_message "Tunnel attempt failed"
+        attempt=$((attempt + 1))
+        [[ $attempt -lt $MAX_RETRIES ]] && log_message "Waiting $RETRY_DELAY seconds before retry" && cleanup && sleep "$RETRY_DELAY"
     done
 
-    log "ERROR" "Failed to establish tunnel after $MAX_RETRIES attempts"
+    log_message "Failed to establish tunnel after all retries"
     return 1
 }
 
-
-# Monitor tunnel health
+#######################################
+# Monitor cloudflared process and restart if stopped.
+# Runs infinite loop checking process every 30 seconds.
+# Returns:
+#   Never returns (infinite loop until signal)
+#######################################
 monitor_tunnel() {
-    log "INFO" "Starting tunnel monitoring"
-
+    log_message "Starting tunnel monitoring"
     while true; do
-        if ! pgrep -f cloudflared >/dev/null 2>&1; then
-            log "WARN" "cloudflared process not found, restarting"
+        if ! pgrep -f cloudflared >/dev/null; then
+            log_message "cloudflared process not found, restarting..."
             if ! start_tunnel; then
-                log "ERROR" "Failed to restart tunnel"
+                log_message "Failed to restart tunnel"
             fi
         fi
-        sleep 30
+        sleep 15  # FAST MODE - reduced from 30s
     done
 }
 
+#-------------------------------------------------------------------------------
+# Main execution
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# MAIN
-#===============================================================================
-main() {
-    log "INFO" "=== SERVER 1 (CLOUDFLARED) STARTING ==="
+trap cleanup EXIT
 
-    if ! install_cloudflared; then
-        log "ERROR" "Server 1 installation failed"
-        exit 1
-    fi
+if ! install_cloudflared; then
+    log_message "ERROR: Server 1 installation failed"
+    exit 1
+fi
 
-    if ! start_tunnel; then
-        log "ERROR" "Server 1 failed to start"
-        exit 1
-    fi
+if ! start_tunnel; then
+    log_message "ERROR: Server 1 failed to start"
+    exit 1
+fi
 
-    log "INFO" "Server 1 is running"
-    monitor_tunnel
-}
-
-
-main "$@"
+log_message "Server 1 is running"
+monitor_tunnel

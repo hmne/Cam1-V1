@@ -1,23 +1,34 @@
 #!/usr/bin/env bash
+#===============================================================================
+# Shell Options (Bash Strict Mode)
+#===============================================================================
+# -e: Exit immediately on error
+# -u: Treat unset variables as errors
+# -o pipefail: Return pipeline failure status
+# IFS: Safe delimiter (prevents word splitting issues)
+#===============================================================================
+#set -euo pipefail
+IFS=$'\n\t'
 
 #===============================================================================
-# LIVE STREAMING SCRIPT
+# CONSTANTS
 #===============================================================================
-set -Eeuo pipefail
+readonly SCRIPT_NAME="Camera Live Stream Script"
+readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_AUTHOR="NetStorm"
 
-
 #===============================================================================
-# CONFIG
+# Constants (UPPERCASE per Google Style Guide)
 #===============================================================================
-readonly DEVICE_ID="${DEVICE_ID:-cam1-V1}"
-readonly BASE_URL="http://XX.com/${DEVICE_ID}"
+readonly DEVICE_ID="${DEVICE_ID:-cam1}"
+readonly BASE_URL="http://netstorm.site/${DEVICE_ID}"
 readonly API_ENDPOINT="${BASE_URL}/storage.php"
 readonly STATUS_URL="${BASE_URL}/tmp/web_live.tmp"
 readonly QUALITY_URL="${BASE_URL}/tmp/web_live_quality.tmp"
 
 # Local file paths
 readonly STATUS_FILE="/tmp/web_live.tmp"
-readonly QUALITY_FILE="/tmp/web_live_quality.tmp"
+readonly QUALITY_FILE="/tmp/web_live_quality.tmp"  
 readonly IMAGE_FILE="/tmp/live.jpg"
 readonly LOG_FILE="/tmp/live.log"
 readonly HEARTBEAT_FILE="/tmp/live_heartbeat.tmp"
@@ -28,247 +39,585 @@ readonly CAPTURE_DELAY=0.2             # 200ms between captures (5 FPS)
 readonly FAILURE_DELAY=2               # 2s delay on failure
 readonly OFFLINE_CHECK_INTERVAL=5      # 5s when offline
 readonly HTTP_TIMEOUT=3                # 3s HTTP timeout
-readonly HEARTBEAT_INTERVAL=10         # Update heartbeat every 10 captures
-
-# Export for external use
-export DEVICE_ID BASE_URL
-
+readonly HEARTBEAT_INTERVAL=5          # Update heartbeat every 5 seconds
 
 #===============================================================================
-# TRAP HANDLERS
+# HELP & VERSION
 #===============================================================================
+
+#######################################
+# Display script version information.
+# Globals:
+#   SCRIPT_NAME
+#   SCRIPT_VERSION
+#   SCRIPT_AUTHOR
+# Outputs:
+#   Writes version info to stdout
+# Returns:
+#   Exits with 0
+#######################################
+show_version() {
+    cat <<EOF
+${SCRIPT_NAME} v${SCRIPT_VERSION}
+Author: ${SCRIPT_AUTHOR}
+EOF
+    exit 0
+}
+
+#######################################
+# Display comprehensive help documentation.
+# Shows usage, features, options, environment variables, and examples.
+# Globals:
+#   SCRIPT_NAME
+#   SCRIPT_AUTHOR
+#   BASE_URL
+# Outputs:
+#   Writes help text to stdout
+# Returns:
+#   Exits with 0
+#######################################
+show_help() {
+    cat <<EOF
+Usage: ${0##*/} [OPTIONS]
+
+${SCRIPT_NAME} - Real-time live camera streaming service
+
+This script runs continuously and provides:
+  - Real-time camera streaming to web interface
+  - Dynamic quality adjustment (resolution and JPEG quality)
+  - Priority-based operation (yields to monitor.sh)
+  - Session tracking (stops when user closes browser)
+  - Heartbeat monitoring for service health
+  - Performance-optimized capture loop (5 FPS default)
+
+FEATURES:
+  - Detects if monitor.sh is active and stops streaming
+  - Tracks web session activity (stops if session expires)
+  - Adjustable quality settings via server
+  - Minimal CPU usage with optimized capture delay
+  - Automatic cleanup on exit
+
+OPTIONS:
+    -h, --help      Show this help message
+    -v, --version   Show version information
+    -d, --debug     Enable debug mode (logs to /tmp/live.log)
+
+ENVIRONMENT VARIABLES:
+    DEVICE_ID       Camera device ID (default: cam1)
+    BASE_URL        Server base URL (default: http://netstorm.site/cam1)
+    DEBUG           Enable debug logging (0/1, default: 0)
+
+EXAMPLES:
+    ${0##*/}                           # Run with defaults
+    DEVICE_ID=cam4 ${0##*/}            # Run for camera 4
+    DEBUG=1 ${0##*/}                   # Run with debug logging
+    ${0##*/} --help                    # Show this help
+
+EXIT CODES:
+    0    Success (service stopped cleanly)
+    1    General error (cleanup triggered)
+
+FILES:
+    /tmp/web_live.tmp               Live stream status (on/off)
+    /tmp/web_live_quality.tmp       Quality settings (width height quality)
+    /tmp/live.jpg                   Temporary live frame image
+    /tmp/live.log                   Debug log file (if DEBUG=1)
+    /tmp/live_heartbeat.tmp         Service heartbeat timestamp
+
+SERVER INTEGRATION:
+    Status URL:     ${BASE_URL}/tmp/web_live.tmp
+    Quality URL:    ${BASE_URL}/tmp/web_live_quality.tmp
+    Session URL:    ${BASE_URL}/tmp/web_live_session.tmp
+    Monitor HB:     ${BASE_URL}/tmp/monitor_heartbeat.tmp
+    Upload API:     ${BASE_URL}/storage.php
+
+AUTHOR:
+    Written by ${SCRIPT_AUTHOR}
+
+REPORTING BUGS:
+    Report bugs to: http://netstorm.site/support
+EOF
+    exit 0
+}
+
+#===============================================================================
+# Cleanup trap
+#===============================================================================
+
+#######################################
+# Cleanup handler for EXIT/INT/TERM signals.
+# Kills raspistill processes, removes temp files, and updates server status.
+# Globals:
+#   IMAGE_FILE
+#   HEARTBEAT_FILE
+#   API_ENDPOINT
+# Arguments:
+#   $1 - Optional exit code (default: 0)
+# Returns:
+#   Exits with provided code or 0
+#######################################
 cleanup() {
-    local exit_code=${1:-$?}
-
-    pkill -9 raspistill 2>/dev/null || :
-    [[ -f "$IMAGE_FILE" ]] && rm -f "$IMAGE_FILE" 2>/dev/null || :
-
-    # Mark service as stopped
-    echo "stopped:$(date +%s)" > "$HEARTBEAT_FILE" 2>/dev/null || :
-    curl -sf -X POST --data-urlencode "file=tmp/web_live.tmp" \
-        --data-urlencode "data=off" "$API_ENDPOINT" -m 2 &>/dev/null || :
-
-    exit "$exit_code"
+  pkill -9 raspistill 2>/dev/null || true
+  if [[ -f "$IMAGE_FILE" ]]; then
+    rm -f "$IMAGE_FILE" 2>/dev/null || true
+  fi
+  # Mark service as stopped
+  echo "stopped:$(date +%s)" > "$HEARTBEAT_FILE" 2>/dev/null || true
+  curl -sf -X POST -d "file=tmp/web_live.tmp" -d "data=off" "$API_ENDPOINT" -m 2 &>/dev/null || true
+  exit "${1:-0}"
 }
 
-
+#######################################
+# Error trap handler for ERR signal.
+# Logs error details to stderr and uploads to server log.
+# Globals:
+#   BASH_LINENO
+#   FUNCNAME
+#   BASH_COMMAND
+#   API_ENDPOINT
+# Outputs:
+#   Writes error message to stderr
+# Returns:
+#   None (trap handler)
+#######################################
 err_trap() {
-    local exit_code=$? line="${BASH_LINENO[0]}" func="${FUNCNAME[1]:-main}"
-    printf '[ERROR %s] %s:%s (exit %d)\n' "$(date '+%H:%M:%S')" "$func" "$line" "$exit_code" >&2
+    local exit_code=$?
+    local line="${BASH_LINENO[0]}"
+    local func="${FUNCNAME[1]:-main}"
+    local cmd="${BASH_COMMAND}"
+
+    printf '[%s] [ERROR] Command failed (exit %s) at line %s in %s(): %s\n' \
+        "$(date '+%H:%M:%S')" "$exit_code" "$line" "$func" "$cmd" >&2
+
+    curl -sf --data "file=log/error.txt&data=[CRITICAL] LIVE Line ${line} in ${func}(): ${cmd} (exit ${exit_code})" \
+        "${API_ENDPOINT}" -m 2 >/dev/null 2>&1 || :
 }
 
-
-trap 'cleanup $?' EXIT INT TERM
+trap cleanup EXIT INT TERM
 trap err_trap ERR
 
+#===============================================================================
+# Logging (minimal for performance)
+#===============================================================================
 
-#===============================================================================
-# LOGGING (minimal for performance)
-#===============================================================================
+#######################################
+# Log debug message to log file (only if DEBUG=1).
+# Globals:
+#   DEBUG
+#   LOG_FILE
+# Arguments:
+#   $1 - Message to log
+# Outputs:
+#   Appends timestamped message to LOG_FILE if DEBUG=1
+# Returns:
+#   0 always
+#######################################
 log() {
-    [[ "${DEBUG:-0}" == "1" ]] || return 0
-    printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$1" >> "$LOG_FILE"
-}
-
-
-err() {
-    printf '[ERROR %s] %s\n' "$(date '+%H:%M:%S')" "$1" >&2
-}
-
-
-#===============================================================================
-# CORE FUNCTIONS
-#===============================================================================
-
-# Check if monitor.sh is active (has priority over web live)
-is_monitor_active() {
-    local hb now
-    hb=$(curl -sf "${BASE_URL}/tmp/monitor_heartbeat.tmp" -m 2 2>/dev/null) || hb="0"
-
-    now=$(date +%s)
-    ((now - hb < 5)) && return 0 || return 1
-}
-
-
-# Check if web session is alive (user hasn't closed browser)
-is_web_session_alive() {
-    local sess now sess_ts
-    sess=$(curl -sf "${BASE_URL}/tmp/web_live_session.tmp" -m 2 2>/dev/null) || return 1
-
-    [[ -z "$sess" ]] && return 1
-
-    sess_ts=${sess%%:*}
-    now=$(date +%s)000
-
-    ((now - sess_ts < 60000)) && return 0 || return 1
-}
-
-
-# Initialize service files
-init_service() {
-    local quality="${DEFAULT_QUALITY}"
-
-    # Create files if missing
-    [[ -f "$QUALITY_FILE" ]] || echo "$quality" > "$QUALITY_FILE"
-    [[ -f "$STATUS_FILE" ]] || echo "off" > "$STATUS_FILE"
-    chmod 666 "$QUALITY_FILE" "$STATUS_FILE" "$LOG_FILE" 2>/dev/null || :
-
-    # Get server state or upload defaults
-    local server_quality server_status
-
-    server_quality=$(curl -sf "$QUALITY_URL" -m "$HTTP_TIMEOUT" 2>/dev/null) || server_quality=""
-    server_status=$(curl -sf "$STATUS_URL" -m "$HTTP_TIMEOUT" 2>/dev/null) || server_status=""
-
-    # Sync with server
-    [[ -n "$server_quality" ]] && echo "$server_quality" > "$QUALITY_FILE"
-    [[ -n "$server_status" ]] && echo "$server_status" > "$STATUS_FILE"
-
-    # Upload defaults if server empty
-    if [[ -z "$server_quality" ]]; then
-        curl -sf -X POST --data-urlencode "file=tmp/web_live_quality.tmp" \
-            --data-urlencode "data=$quality" "$API_ENDPOINT" -m "$HTTP_TIMEOUT" &>/dev/null || :
-    fi
-
-    if [[ -z "$server_status" ]]; then
-        curl -sf -X POST --data-urlencode "file=tmp/web_live.tmp" \
-            --data-urlencode "data=off" "$API_ENDPOINT" -m "$HTTP_TIMEOUT" &>/dev/null || :
-    fi
-
-    log "Service initialized"
-}
-
-
-# Get clean status from server with priority checks
-fetch_status() {
-    local status
-    status=$(curl -sf "$STATUS_URL" -m "$HTTP_TIMEOUT" 2>/dev/null | tr -d '[:space:]') || status="off"
-
-    # Priority 1: Monitor active -> force off
-    is_monitor_active && { echo "off"; return; }
-
-    # Priority 2: Status on but session dead -> force off
-    [[ "$status" == "on" ]] && ! is_web_session_alive && { echo "off"; return; }
-
-    # Return validated status
-    [[ "$status" =~ ^(on|off)$ ]] && echo "$status" || echo "off"
-}
-
-
-# Get quality settings with validation
-fetch_quality() {
-    local quality
-    quality=$(curl -sf "$QUALITY_URL" -m "$HTTP_TIMEOUT" 2>/dev/null | tr -d '\r') || return 1
-
-    # Validate format: 3 numbers
-    if [[ "$quality" =~ ^[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+$ ]]; then
-        local old_quality
-        old_quality=$(cat "$QUALITY_FILE" 2>/dev/null) || old_quality=""
-
-        if [[ "$quality" != "$old_quality" ]]; then
-            echo "$quality" > "$QUALITY_FILE"
-            log "Quality: $quality"
-        fi
-
-        return 0
-    fi
-
-    return 1
-}
-
-
-# Capture and upload image
-capture_image() {
-    local width height quality
-
-    # Fetch latest quality (critical for real-time updates)
-    fetch_quality || :
-
-    # Parse quality settings
-    IFS=' ' read -r width height quality < "$QUALITY_FILE" 2>/dev/null || {
-        IFS=' ' read -r width height quality <<< "$DEFAULT_QUALITY"
-    }
-
-    # Validate numeric values inline
-    [[ "$width" =~ ^[0-9]+$ ]] || width=480
-    [[ "$height" =~ ^[0-9]+$ ]] || height=360
-    [[ "$quality" =~ ^[0-9]+$ ]] || quality=8
-
-    # Capture with minimal timeout (100ms)
-    raspistill -t 100 -q "$quality" -w "$width" -h "$height" -o "$IMAGE_FILE" \
-        -n -awb auto -ss 33333 -sh 25 -md 0 -ae 12 -a 4 \
-        -a "N.S-${DEVICE_ID^^} %Y-%m-%d %X" 2>/dev/null || return 1
-
-    # Upload image
-    curl -sf -X POST -F "upfile=@${IMAGE_FILE};type=image/jpeg" \
-        "${API_ENDPOINT}?name=live.jpg" -m "$HTTP_TIMEOUT" &>/dev/null || return 1
-
+  if [[ "${DEBUG:-0}" != "1" ]]; then
     return 0
+  fi
+  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$1" >> "$LOG_FILE" || true
 }
 
+#######################################
+# Log error message to stderr.
+# Arguments:
+#   $1 - Error message
+# Outputs:
+#   Writes timestamped error message to stderr
+# Returns:
+#   0 always
+#######################################
+err() { printf '[ERROR %s] %s\n' "$(date '+%H:%M:%S')" "$1" >&2; }
 
-# Update heartbeat for monitoring
-update_heartbeat() {
-    local count="${1:-0}"
+#===============================================================================
+# Core Functions
+#===============================================================================
 
-    # Update heartbeat every N captures
-    if ((count % HEARTBEAT_INTERVAL == 0)); then
-        date +%s > "$HEARTBEAT_FILE" 2>/dev/null || :
+#######################################
+# Check if monitor service is active (heartbeat within 5 seconds).
+# Monitor service has priority over live streaming.
+# Globals:
+#   BASE_URL
+# Returns:
+#   0 if monitor is active, 1 if inactive
+#######################################
+is_monitor_active() {
+  local hb now
+  hb=$(curl -sf "${BASE_URL}/tmp/monitor_heartbeat.tmp" -m 2 2>/dev/null) || hb="0"
+  now=$(date +%s)
+  if (( now - hb < 5 )); then
+    return 0
+  else
+    return 1
+  fi
+}
 
-        # Upload heartbeat to server
-        curl -sf -X POST --data-urlencode "file=tmp/live_heartbeat.tmp" \
-            --data-urlencode "data=$(date +%s)" "$API_ENDPOINT" -m 2 &>/dev/null || :
+#######################################
+# Check if web browser session is alive (updated within 60 seconds).
+# Prevents streaming to closed browser tabs.
+# Globals:
+#   BASE_URL
+# Returns:
+#   0 if session is alive, 1 if expired or missing
+#######################################
+is_web_session_alive() {
+  local sess now sess_ts
+  sess=$(curl -sf "${BASE_URL}/tmp/web_live_session.tmp" -m 2 2>/dev/null) || return 1
+  if [[ -z "$sess" ]]; then
+    return 1
+  fi
+  sess_ts=${sess%%:*}
+  now=$(date +%s)000
+  if (( now - sess_ts < 60000 )); then
+    return 0
+  else
+    return 1
+  fi
+}
+
+#######################################
+# Initialize live streaming service.
+# Creates local files, syncs with server state, uploads defaults if needed.
+# Globals:
+#   DEFAULT_QUALITY
+#   QUALITY_FILE
+#   STATUS_FILE
+#   LOG_FILE
+#   QUALITY_URL
+#   STATUS_URL
+#   API_ENDPOINT
+#   HTTP_TIMEOUT
+# Outputs:
+#   Logs initialization status
+# Returns:
+#   0 always
+#######################################
+init_service() {
+  local quality="${DEFAULT_QUALITY}"
+
+  #---------------------------------------------------------------------------
+  # Initialize server state on startup
+  # Reset live stream flags to prevent stale commands from previous sessions
+  #---------------------------------------------------------------------------
+  curl -sf -X POST -d "file=tmp/web_live.tmp" -d "data=off" "$API_ENDPOINT" -m 3 &>/dev/null || true
+  curl -sf -X POST -d "file=tmp/web_live_quality.tmp" -d "data=${quality}" "$API_ENDPOINT" -m 3 &>/dev/null || true
+
+  # Create files if missing
+  [[ -f "$QUALITY_FILE" ]] || echo "$quality" > "$QUALITY_FILE"
+  [[ -f "$STATUS_FILE" ]] || echo "off" > "$STATUS_FILE"
+  chmod 666 "$QUALITY_FILE" "$STATUS_FILE" "$LOG_FILE" 2>/dev/null || true
+  
+  # Get server state or upload defaults
+  local server_quality server_status
+  server_quality=$(curl -sf "$QUALITY_URL" -m "$HTTP_TIMEOUT" 2>/dev/null) || {
+    err "Failed to fetch quality settings from server: $QUALITY_URL"
+    err "Will use default quality: $quality"
+    server_quality=""
+  }
+  server_status=$(curl -sf "$STATUS_URL" -m "$HTTP_TIMEOUT" 2>/dev/null) || {
+    err "Failed to fetch status from server: $STATUS_URL"
+    err "Will use default status: off"
+    server_status=""
+  }
+  
+  # Sync with server
+  if [[ -n "$server_quality" ]]; then
+    echo "$server_quality" > "$QUALITY_FILE"
+  fi
+  if [[ -n "$server_status" ]]; then
+    echo "$server_status" > "$STATUS_FILE"
+  fi
+
+  # Upload defaults if server empty
+  if [[ -z "$server_quality" ]]; then
+    curl -sf -X POST -d "file=tmp/web_live_quality.tmp" -d "data=$quality" "$API_ENDPOINT" -m "$HTTP_TIMEOUT" &>/dev/null || true
+  fi
+  if [[ -z "$server_status" ]]; then
+    curl -sf -X POST -d "file=tmp/web_live.tmp" -d "data=off" "$API_ENDPOINT" -m "$HTTP_TIMEOUT" &>/dev/null || true
+  fi
+  
+  log "Service initialized"
+}
+
+#######################################
+# Fetch and validate live streaming status from server.
+# Enforces priority rules: monitor > session validation > status.
+# Globals:
+#   STATUS_URL
+#   HTTP_TIMEOUT
+# Outputs:
+#   Writes validated status (on/off) to stdout
+# Returns:
+#   0 always
+#######################################
+fetch_status() {
+  local status
+  status=$(curl -sf "$STATUS_URL" -m "$HTTP_TIMEOUT" 2>/dev/null | tr -d '[:space:]') || status="off"
+
+  # Priority 1: Monitor active -> force off
+  if is_monitor_active; then
+    echo "off"
+    return 0
+  fi
+
+  # Priority 2: Status on but session dead -> force off
+  if [[ "$status" == "on" ]] && ! is_web_session_alive; then
+    echo "off"
+    return 0
+  fi
+
+  # Return validated status
+  if [[ "$status" =~ ^(on|off)$ ]]; then
+    echo "$status"
+  else
+    echo "off"
+  fi
+}
+
+#######################################
+# Fetch and validate quality settings from server.
+# Updates local quality file if settings changed.
+# Globals:
+#   QUALITY_URL
+#   QUALITY_FILE
+#   HTTP_TIMEOUT
+# Outputs:
+#   Logs quality changes and errors
+# Returns:
+#   0 on success, 1 on network failure or validation error
+#######################################
+fetch_quality() {
+  local quality
+  quality=$(curl -sf "$QUALITY_URL" -m "$HTTP_TIMEOUT" 2>/dev/null | tr -d '\r') || {
+    err "Failed to fetch quality settings from $QUALITY_URL"
+    err "Network may be down or server unreachable"
+    err "Will continue with existing quality settings from $QUALITY_FILE"
+    return 1
+  }
+
+  # Validate format: 3 numbers
+  if [[ "$quality" =~ ^[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+$ ]]; then
+    local old_quality
+    old_quality=$(cat "$QUALITY_FILE" 2>/dev/null) || old_quality=""
+    if [[ "$quality" != "$old_quality" ]]; then
+      echo "$quality" > "$QUALITY_FILE"
+      log "Quality: $quality"
     fi
+    return 0
+  fi
+
+  err "Invalid quality format received: '$quality'"
+  err "Expected format: 'WIDTH HEIGHT QUALITY' (3 space-separated numbers)"
+  err "Example: '640 480 10'"
+  err "Will continue with existing quality settings"
+  return 1
 }
 
+#######################################
+# Capture camera image and upload to server.
+# Fetches latest quality settings, captures with raspistill, uploads via API.
+# Globals:
+#   QUALITY_FILE
+#   DEFAULT_QUALITY
+#   IMAGE_FILE
+#   DEVICE_ID
+#   API_ENDPOINT
+#   HTTP_TIMEOUT
+# Outputs:
+#   Writes detailed error messages on failure
+# Returns:
+#   0 on success, 1 on capture or upload failure
+#######################################
+capture_image() {
+  local width height quality
+
+  # Fetch latest quality (critical for real-time updates)
+  fetch_quality || true
+
+  # Parse quality settings
+  IFS=' ' read -r width height quality < "$QUALITY_FILE" 2>/dev/null || {
+    IFS=' ' read -r width height quality <<< "$DEFAULT_QUALITY"
+  }
+
+  # Validate numeric values inline
+  [[ "$width" =~ ^[0-9]+$ ]] || width=480
+  [[ "$height" =~ ^[0-9]+$ ]] || height=360
+  [[ "$quality" =~ ^[0-9]+$ ]] || quality=8
+
+  # Capture with minimal timeout (100ms)
+  if raspistill -t 100 -q "$quality" -w "$width" -h "$height" -o "$IMAGE_FILE" \
+    -n -awb auto -ss 33333 -sh 25 -md 0 -ae 12 -a 4 \
+    -a "N.S-${DEVICE_ID^^} %Y-%m-%d %X" 2>&1; then
+    : # Success - continue to upload
+  else
+    err "raspistill capture failed with exit code $?"
+    err "Requested: ${width}x${height} @ quality ${quality}"
+    err "Possible causes: camera busy, disconnected, insufficient memory, or device error"
+    err "Check: vcgencmd get_camera (should show detected=1)"
+    err "Check: pgrep raspistill (should be empty or show only this process)"
+    return 1
+  fi
+
+  # Upload image
+  if ! curl -sf -X POST -F "upfile=@${IMAGE_FILE};type=image/jpeg" \
+    "${API_ENDPOINT}?name=live.jpg" -m "$HTTP_TIMEOUT" &>/dev/null; then
+    err "Upload failed to ${API_ENDPOINT}"
+    err "Image file: ${IMAGE_FILE} ($(stat -c%s "$IMAGE_FILE" 2>/dev/null || echo 0) bytes)"
+    err "Possible causes: network down, server offline, timeout (${HTTP_TIMEOUT}s), or server rejecting upload"
+    err "Test server: curl -I ${API_ENDPOINT}"
+    err "Test network: ping netstorm.site"
+    return 1
+  fi
+
+  return 0
+}
+
+#######################################
+# Update service heartbeat timestamp.
+# Updates every HEARTBEAT_INTERVAL seconds (time-based, not capture-based).
+# Globals:
+#   HEARTBEAT_INTERVAL
+#   HEARTBEAT_FILE
+#   API_ENDPOINT
+# Arguments:
+#   $1 - Optional: "force" to force immediate update
+# Returns:
+#   0 always
+#######################################
+update_heartbeat() {
+  # Update heartbeat based on time (not capture count)
+  local now last_update elapsed force_update raw_value
+  now=$(date +%s)
+  last_update=0
+  force_update="${1:-}"
+
+  # Read last update time if file exists
+  if [[ -f "$HEARTBEAT_FILE" ]]; then
+    raw_value=$(cat "$HEARTBEAT_FILE" 2>/dev/null) || raw_value=""
+
+    # Extract timestamp (handle "stopped:1234" or plain "1234")
+    if [[ "$raw_value" =~ ^stopped:([0-9]+)$ ]]; then
+      last_update="${BASH_REMATCH[1]}"
+    elif [[ "$raw_value" =~ ^[0-9]+$ ]]; then
+      last_update="$raw_value"
+    else
+      last_update=0
+    fi
+  fi
+
+  # Ensure last_update is numeric (default to 0 if empty/invalid)
+  last_update=${last_update:-0}
+
+  # Update only if HEARTBEAT_INTERVAL seconds have passed
+  elapsed=$((now - last_update))
+  if (( elapsed >= HEARTBEAT_INTERVAL )) || [[ "$force_update" == "force" ]]; then
+    echo "$now" > "$HEARTBEAT_FILE" 2>/dev/null || true
+    # Upload heartbeat to server
+    curl -sf -X POST -d "file=tmp/live_heartbeat.tmp" -d "data=${now}" \
+      "$API_ENDPOINT" -m 2 &>/dev/null || true
+  fi
+}
 
 #===============================================================================
-# MAIN LOOP
+# Main Loop
 #===============================================================================
+
+#######################################
+# Main service loop for live streaming.
+# Initializes service, monitors status, captures and uploads images.
+# Implements exponential backoff on persistent failures.
+# Returns:
+#   Never returns (infinite loop until signal)
+#######################################
 main() {
-    log "=== LIVE STREAMING SERVICE STARTED ==="
+  init_service
 
-    init_service
+  # Read initial status from server (not hardcoded "off")
+  local status
+  status=$(fetch_status)
+  local capture_count=0 failure_count=0
 
-    local status="off" capture_count=0 failure_count=0
+  log "Service started with initial status: $status"
 
-    log "Service started"
+  # Send initial heartbeat to inform website that script is alive
+  update_heartbeat force
 
-    while true; do
-        # Get current status from server
-        local new_status
-        new_status=$(fetch_status)
+  while true; do
+    # Get current status from server
+    local new_status
+    new_status=$(fetch_status)
 
-        # Log status changes
-        if [[ "$new_status" != "$status" ]]; then
-            log "Status: $status -> $new_status"
-            status="$new_status"
-            failure_count=0
-        fi
+    # Log status changes
+    if [[ "$new_status" != "$status" ]]; then
+      log "Status: $status -> $new_status"
+      status="$new_status"
+      failure_count=0
+    fi
+    
+    if [[ "$status" == "on" ]]; then
+      # Live mode - capture and upload
+      if capture_image; then
+        capture_count=$((capture_count + 1))
+        failure_count=0
+        update_heartbeat
+        sleep "$CAPTURE_DELAY"
+      else
+        failure_count=$((failure_count + 1))
+        # After 5 failures, detect cause and stop
+        if (( failure_count > 5 )); then
+          # Smart error detection
+          local cam_info mem_avail error_msg
+          cam_info="$(vcgencmd get_camera 2>/dev/null)" || cam_info=""
+          mem_avail="$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null)" || mem_avail="0"
 
-        if [[ "$status" == "on" ]]; then
-            # Live mode - capture and upload
-            if capture_image; then
-                ((capture_count++)) || capture_count=1
-                failure_count=0
-                update_heartbeat "$capture_count"
-                sleep "$CAPTURE_DELAY"
-            else
-                ((failure_count++)) || failure_count=1
+          if [[ "$cam_info" != *"detected=1"* ]]; then
+            error_msg="Live Error: Camera not connected (detected=0)"
+          elif [[ "$mem_avail" -lt 10 ]]; then
+            error_msg="Live Error: Insufficient memory (${mem_avail}MB free)"
+          elif [[ ! -e /dev/video0 ]]; then
+            error_msg="Live Error: /dev/video0 not found"
+          else
+            error_msg="Live Error: Capture failed after ${failure_count} attempts"
+          fi
 
-                # Exponential backoff on failures
-                if ((failure_count > 5)); then
-                    sleep "$FAILURE_DELAY"
-                else
-                    sleep "$CAPTURE_DELAY"
-                fi
-            fi
+          # Log to server (so user can see on website)
+          local ts
+          ts="$(TZ=Asia/Kuwait date '+%d/%m/%Y %I:%M:%S %p')"
+          curl -sf --data "file=log/log.txt&data=${error_msg}, ${ts}." "$API_ENDPOINT" -m 3 &>/dev/null || true
+
+          # Reset web_live to "off" to stop the loop
+          curl -sf -X POST -d "file=tmp/web_live.tmp" -d "data=off" "$API_ENDPOINT" -m 2 &>/dev/null || true
+
+          # Reset failure count and wait
+          failure_count=0
+          sleep "$FAILURE_DELAY"
         else
-            # Offline mode - wait and check
-            capture_count=0
-            sleep "$OFFLINE_CHECK_INTERVAL"
+          sleep "$CAPTURE_DELAY"
         fi
-    done
+      fi
+    else
+      # Offline mode - wait and check
+      capture_count=0
+      # Send heartbeat even when offline so website knows script is alive
+      update_heartbeat
+      sleep "$OFFLINE_CHECK_INTERVAL"
+    fi
+  done
 }
 
-
-main "$@"
+#===============================================================================
+# PARSE COMMAND LINE ARGUMENTS
+#===============================================================================
+# Parse arguments before main
+[[ "${BASH_SOURCE[0]}" == "${0}" ]] && {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)    show_help ;;
+            -v|--version) show_version ;;
+            -d|--debug)   export DEBUG=1; shift ;;
+            *)            echo "Unknown option: $1" >&2; show_help ;;
+        esac
+    done
+    main
+}

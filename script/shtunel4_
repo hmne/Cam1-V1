@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 
-#===============================================================================
-# BORE TUNNEL SCRIPT - Server 4
-#===============================================================================
-set -Eeuo pipefail
+#set -euo pipefail
+IFS=$'\n\t'
 
+#-------------------------------------------------------------------------------
+# Configuration
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# CONFIG
-#===============================================================================
-readonly DEVICE_ID="${DEVICE_ID:-cam1-V1}"
-readonly BASE_URL="http://XX.com/${DEVICE_ID}"
+readonly DEVICE_ID="${DEVICE_ID:-cam1}"
+readonly BASE_URL="http://netstorm.site/${DEVICE_ID}"
 readonly MIN_VERSION="0.5.1"
 readonly T_PORT="80"
 readonly CUSTOM_SERVER="193.160.119.136"
@@ -26,58 +24,84 @@ readonly MAX_RETRIES=3
 readonly RETRY_DELAY=2
 readonly TIMEOUT=60
 
-# Export for external use
-export DEVICE_ID BASE_URL
-
-
-#===============================================================================
-# TRAP HANDLERS
-#===============================================================================
-cleanup() {
-    local exit_code=${1:-$?}
-
-    log "INFO" "Cleaning up processes"
-    pkill -f bore 2>/dev/null || :
-    rm -f "$LOG_FILE" "$URL_FILE"
-
-    exit "$exit_code"
-}
-
-
+#######################################
+# Error trap handler for ERR signal.
+# Logs error details to stderr and uploads to server log.
+# Globals:
+#   BASH_LINENO, FUNCNAME, BASH_COMMAND, BASE_URL
+# Outputs:
+#   Writes error message to stderr
+# Returns:
+#   None (trap handler)
+#######################################
 err_trap() {
-    local exit_code=$? line="${BASH_LINENO[0]}" func="${FUNCNAME[1]:-main}"
-    log "ERROR" "${func}():${line} failed (exit $exit_code)"
+    local exit_code=$?
+    local line="${BASH_LINENO[0]}"
+    local func="${FUNCNAME[1]:-main}"
+    local cmd="${BASH_COMMAND}"
+
+    printf '[%s] [ERROR] Command failed (exit %s) at line %s in %s(): %s\n' \
+        "$(date '+%H:%M:%S')" "$exit_code" "$line" "$func" "$cmd" >&2
+
+    curl -sf --data "file=log/error.txt&data=[CRITICAL] TUNEL4 Line ${line} in ${func}(): ${cmd} (exit ${exit_code})" \
+        "${BASE_URL}/storage.php" -m 2 >/dev/null 2>&1 || :
 }
 
-
-trap 'cleanup $?' EXIT INT TERM
 trap err_trap ERR
 
+#-------------------------------------------------------------------------------
+# Functions
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# LOGGING
-#===============================================================================
-log() {
-    local level="$1" msg="$2"
+#######################################
+# Log timestamped message to log file and stdout.
+# Globals:
+#   LOG_FILE
+# Arguments:
+#   $1 - Message to log
+# Outputs:
+#   Writes timestamped message to both stdout and log file
+# Returns:
+#   0 always
+#######################################
+log_message() {
     local timestamp
-    timestamp=$(TZ=Asia/Kuwait date '+%Y-%m-%d %H:%M:%S')
-    printf '[%s] [%s] %s\n' "$timestamp" "$level" "$msg" | tee -a "$LOG_FILE"
+    timestamp=$(TZ=Asia/Kuwait date)
+    echo "$timestamp: $1" | tee -a "$LOG_FILE"
 }
 
+#######################################
+# Cleanup handler for EXIT signal.
+# Terminates bore processes and removes temp files.
+# Globals:
+#   LOG_FILE, URL_FILE
+# Returns:
+#   0 always
+#######################################
+cleanup() {
+    log_message "Cleaning up processes and files..."
+    pkill -f bore
+    rm -f "$LOG_FILE" "$URL_FILE"
+}
 
-#===============================================================================
-# FUNCTIONS
-#===============================================================================
-
-# Get bore version (Pure Bash)
+#######################################
+# Get installed bore version.
+# Extracts version number from bore --version output.
+# Globals:
+#   BORE_BIN
+# Outputs:
+#   Writes version string to stdout (e.g., 0.5.1 or 0.0.0 if not found)
+# Returns:
+#   0 always
+#######################################
 get_version() {
+    # Pure bash: extract version from output
     local version_output
     version_output=$("$BORE_BIN" --version 2>/dev/null) || { echo "0.0.0"; return; }
 
     # Extract second word (version number)
     local -a words
     read -ra words <<< "$version_output"
-
     if [[ ${#words[@]} -ge 2 ]]; then
         echo "${words[1]}"
     else
@@ -85,100 +109,92 @@ get_version() {
     fi
 }
 
-
-# Install bore with file verification
+#######################################
+# Install or update bore binary.
+# Tries custom source first, then official GitHub release.
+# Globals:
+#   BORE_BIN, MIN_VERSION, TEMP_DIR, BASE_URL
+# Returns:
+#   0 on success, 1 on failure
+#######################################
 install_bore() {
-    local current_version temp_file="$TEMP_DIR/bore_temp"
+    local current_version
+    local temp_file="$TEMP_DIR/bore_temp"
 
     if [[ -f $BORE_BIN ]]; then
         current_version=$(get_version)
-
         if [[ $current_version == "$MIN_VERSION" ]]; then
-            log "INFO" "bore version $current_version is correct"
+            log_message "bore version $current_version is correct"
             return 0
         fi
-
-        log "INFO" "Current bore version $current_version needs update to $MIN_VERSION"
+        log_message "Current bore version $current_version needs update to $MIN_VERSION"
     else
-        log "INFO" "bore not found. Installing..."
+        log_message "bore not found. Installing..."
     fi
 
     cd "$TEMP_DIR" || return 1
 
-    local attempt
-
-    for attempt in {1..3}; do
-        log "INFO" "Download attempt $attempt/3 from custom source"
-
-        if wget -q "$BASE_URL/downloads/bore" -O "$temp_file" 2>/dev/null; then
-            chmod +x "$temp_file"
-
-            # Verify file size (minimum 500KB)
-            local file_size
-            file_size=$(stat -c%s "$temp_file" 2>/dev/null || echo 0)
-
-            if [[ $file_size -ge 500000 ]]; then
-                sudo mv "$temp_file" "$BORE_BIN"
-                log "INFO" "Successfully installed bore from custom source (${file_size} bytes)"
-                return 0
-            fi
-
-            log "WARN" "Downloaded file too small ($file_size bytes), retry $attempt/3"
-            rm -f "$temp_file"
-        fi
-
-        sleep 1
-    done
-
-    log "INFO" "Trying official source"
-    if wget -q "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-armv7-unknown-linux-gnueabihf.tar.gz" -O bore.tar.gz 2>/dev/null; then
-        tar xzf bore.tar.gz
-        chmod +x bore
-
-        # Verify file size
-        local file_size
-        file_size=$(stat -c%s bore 2>/dev/null || echo 0)
-
-        if [[ $file_size -ge 500000 ]]; then
-            sudo mv bore "$BORE_BIN"
-            rm -f bore.tar.gz
-            log "INFO" "Successfully installed bore from official source (${file_size} bytes)"
-            return 0
-        fi
+    log_message "Attempting to download from custom source..."
+    if wget -q "$BASE_URL/downloads/bore" -O "$temp_file"; then
+        chmod +x "$temp_file"
+        sudo mv "$temp_file" "$BORE_BIN"
+        log_message "Successfully installed bore from custom source"
+        return 0
     fi
 
-    log "ERROR" "Failed to install bore from any source"
+    log_message "Custom source failed, trying official source..."
+    if wget -q "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-armv7-unknown-linux-gnueabihf.tar.gz" -O bore.tar.gz; then
+        tar xzf bore.tar.gz
+        chmod +x bore
+        sudo mv bore "$BORE_BIN"
+        rm -f bore.tar.gz
+        log_message "Successfully installed bore from official source"
+        return 0
+    fi
+
+    log_message "Failed to install bore from any source"
     return 1
 }
 
-
-# Try server connection
+#######################################
+# Try connecting to a bore server.
+# Starts bore in background, waits for connection, extracts URL from log.
+# Globals:
+#   BORE_BIN, T_PORT, LOG_FILE, URL_FILE, TIMEOUT
+# Arguments:
+#   $1 - Server address
+#   $2 - Server secret (empty for public servers)
+#   $3 - Server type (public/custom, default: public)
+# Returns:
+#   0 if connection successful, 1 on timeout
+#######################################
 try_server() {
-    local server="$1" secret="$2" server_type="${3:-public}"
-
+    local server="$1"
+    local secret="$2"
+    local server_type="${3:-public}"
     # Build command
     if [[ -n $secret ]]; then
-        log "INFO" "Attempting connection to custom server: $server"
+        log_message "Attempting connection to custom server: $server"
         "$BORE_BIN" local "$T_PORT" --to "$server" --secret "$secret" > "$LOG_FILE" 2>&1 &
     else
-        log "INFO" "Attempting connection to public server: $server"
+        log_message "Attempting connection to public server: $server"
         "$BORE_BIN" local "$T_PORT" --to "$server" > "$LOG_FILE" 2>&1 &
     fi
 
     local bore_pid=$!
-    log "INFO" "Started bore process with PID: $bore_pid"
+    log_message "Started bore process with PID: $bore_pid"
 
     local wait_count=0
     while [[ $wait_count -lt $TIMEOUT ]]; do
-        # Check for "listening at" in log file
+        # Pure bash: check for "listening at" in log file
         if [[ -f $LOG_FILE ]]; then
             local log_content
             log_content=$(<"$LOG_FILE")
 
             if [[ $log_content == *"listening at"* ]]; then
-                # Extract URL with grep or pure bash
+                # Use grep to extract clean URL
                 local url
-                url=$(grep -oP 'listening at \K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$LOG_FILE" 2>/dev/null || :)
+                url=$(grep -oP 'listening at \K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$LOG_FILE" 2>/dev/null)
 
                 if [[ -z "$url" ]]; then
                     # Fallback: pure bash extraction
@@ -198,119 +214,108 @@ try_server() {
 
                 if [[ -n "$url" ]]; then
                     echo "http://$url" > "$URL_FILE"
-                    log "INFO" "Successfully connected to $server_type server. URL: http://$url"
-
-                    sleep 0.2  # Service stabilization delay
+                    log_message "Successfully connected to $server_type server. URL: http://$url"
                     return 0
                 fi
             fi
         fi
 
-        if ! ps -p "$bore_pid" > /dev/null 2>&1; then
-            log "WARN" "bore process $bore_pid died unexpectedly"
+        if ! ps -p $bore_pid > /dev/null; then
+            log_message "bore process $bore_pid died unexpectedly"
             break
         fi
-
         sleep 1
-        ((wait_count++))
+        wait_count=$((wait_count + 1))
     done
 
-    log "WARN" "Connection attempt to $server_type server timed out or failed"
-    kill "$bore_pid" 2>/dev/null || :
+    log_message "Connection attempt to $server_type server timed out or failed"
+    kill $bore_pid 2>/dev/null
     return 1
 }
 
-
-# Start tunnel with retry
+#######################################
+# Start bore tunnel with retry logic.
+# Tries custom server first, then falls back to public bore.pub server.
+# Performs up to MAX_RETRIES attempts with cleanup between failures.
+# Globals:
+#   MAX_RETRIES, CUSTOM_SERVER, CUSTOM_SECRET, RETRY_DELAY
+# Returns:
+#   0 if tunnel established on any server, 1 after all retries fail
+#######################################
 start_tunnel() {
-    local attempt
+    local attempt=0
+    cleanup
 
-    # Clean up existing processes
-    pkill -f bore 2>/dev/null || :
-    rm -f "$LOG_FILE" "$URL_FILE"
+    while [[ $attempt -lt $MAX_RETRIES ]]; do
+        log_message "Starting tunnel attempt $((attempt + 1)) of $MAX_RETRIES"
 
-    for attempt in $(seq 1 "$MAX_RETRIES"); do
-        log "INFO" "Starting tunnel attempt $attempt/$MAX_RETRIES"
-
-        # Try custom server first
         if try_server "$CUSTOM_SERVER" "$CUSTOM_SECRET" "custom"; then
             return 0
         fi
 
-        log "WARN" "Custom server failed, trying public server"
-
-        # Try public server as fallback
+        log_message "Custom server failed, trying public server"
         if try_server "bore.pub" "" "public"; then
             return 0
         fi
 
+        attempt=$((attempt + 1))
         if [[ $attempt -lt $MAX_RETRIES ]]; then
-            log "INFO" "Both servers failed. Waiting ${RETRY_DELAY}s before retry"
+            log_message "Both servers failed. Waiting $RETRY_DELAY seconds before retry..."
             sleep "$RETRY_DELAY"
-
-            # Clean up for retry
-            pkill -f bore 2>/dev/null || :
-            rm -f "$LOG_FILE" "$URL_FILE"
         fi
+        cleanup
     done
 
-    log "ERROR" "All connection attempts failed after $MAX_RETRIES tries"
+    log_message "All connection attempts failed after $MAX_RETRIES tries"
     return 1
 }
 
-
-# Monitor tunnel health
+#######################################
+# Monitor bore process and restart if stopped.
+# Runs infinite loop checking process every 30 seconds.
+# Calls start_tunnel() to re-establish connection if bore dies.
+# Returns:
+#   Never returns (infinite loop until signal)
+#######################################
 monitor_tunnel() {
-    log "INFO" "Starting tunnel monitoring"
-
+    log_message "Starting tunnel monitoring"
     while true; do
-        if ! pgrep -f bore >/dev/null 2>&1; then
-            log "WARN" "bore process not found, restarting tunnel"
-            if ! start_tunnel; then
-                log "ERROR" "Failed to restart tunnel"
-            fi
+        if ! pgrep -f bore >/dev/null; then
+            log_message "bore process not found, restarting tunnel"
+            start_tunnel
         fi
-        sleep 30
+        sleep 15  # FAST MODE - reduced from 30s
     done
 }
 
+#-------------------------------------------------------------------------------
+# Main execution
+#-------------------------------------------------------------------------------
 
-#===============================================================================
-# MAIN
-#===============================================================================
-main() {
-    # Use flock to prevent multiple instances
-    (
-        flock -n 9 || {
-            log "ERROR" "Another instance of tunel4.sh is running. Exiting."
-            exit 1
-        }
+(
+    flock -n 9 || { log_message "Another instance of tunel4.sh is running. Exiting."; exit 1; }
 
-        log "INFO" "=== SERVER 4 (BORE) STARTING ==="
+    trap cleanup EXIT
 
-        if ! install_bore; then
-            log "ERROR" "Failed to install bore. Exiting."
-            exit 1
-        fi
-
-        if ! start_tunnel; then
-            log "ERROR" "Failed to establish tunnel. Exiting."
-            exit 1
-        fi
-
-        monitor_tunnel
-
-    ) 9>"$LOCK_FILE"
-
-    rm -f "$LOCK_FILE"
-
-    # Final status check
-    if [[ -s $URL_FILE ]]; then
-        log "INFO" "Server 4 is running successfully"
-    else
-        log "ERROR" "Server 4 failed to start. Check $LOG_FILE for details"
+    if ! install_bore; then
+        log_message "Failed to install bore. Exiting."
+        exit 1
     fi
-}
 
+    if ! start_tunnel; then
+        log_message "Failed to establish tunnel. Exiting."
+        exit 1
+    fi
 
-main "$@"
+    monitor_tunnel
+
+) 9>"$LOCK_FILE"
+
+rm -f "$LOCK_FILE"
+
+# Final status check for start.sh monitoring
+if [[ -s $URL_FILE ]]; then
+    log_message "Server 4 is running successfully"
+else
+    log_message "Error: Server 4 failed to start. Check $LOG_FILE for details"
+fi

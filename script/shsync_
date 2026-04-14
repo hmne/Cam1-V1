@@ -1,78 +1,186 @@
 #!/usr/bin/env bash
+#===============================================================================
+# Shell Options (Bash Strict Mode)
+#===============================================================================
+# -e: Exit on error
+# -u: Exit on undefined variable
+# -o pipefail: Fail pipeline if any command fails
+# IFS: Safe field separator (newline and tab only)
+#===============================================================================
+#set -euo pipefail
+IFS=$'\n\t'
 
 #===============================================================================
-# SYNC SCRIPT - Camera Status Synchronization
+# CONSTANTS
 #===============================================================================
-set -Eeuo pipefail
-
-
-#===============================================================================
-# CONFIG
-#===============================================================================
-readonly DEVICE_ID="${DEVICE_ID:-cam1-V1}"
-readonly BASE_URL="http://XX.com/${DEVICE_ID}"
-
-# Export for external scripts
-export DEVICE_ID BASE_URL
-
+readonly SCRIPT_NAME="Camera Sync Script"
+readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_AUTHOR="NetStorm"
 
 #===============================================================================
-# TRAP HANDLERS
+# DEVICE CONFIGURATION
 #===============================================================================
+readonly DEVICE_ID="${DEVICE_ID:-cam1}"
+readonly BASE_URL="http://netstorm.site/${DEVICE_ID}"
+
+#===============================================================================
+# HELP & VERSION
+#===============================================================================
+
+#######################################
+# Display script version information.
+# Globals:
+#   SCRIPT_NAME
+#   SCRIPT_VERSION
+#   SCRIPT_AUTHOR
+# Outputs:
+#   Writes version info to stdout
+# Returns:
+#   Exits with 0
+#######################################
+show_version() {
+    cat <<EOF
+${SCRIPT_NAME} v${SCRIPT_VERSION}
+Author: ${SCRIPT_AUTHOR}
+EOF
+    exit 0
+}
+
+#######################################
+# Display comprehensive help documentation.
+# Shows usage, features, options, environment variables, and examples.
+# Globals:
+#   SCRIPT_NAME
+#   SCRIPT_AUTHOR
+# Outputs:
+#   Writes help text to stdout
+# Returns:
+#   Exits with 0
+#######################################
+show_help() {
+    cat <<EOF
+Usage: ${0##*/} [OPTIONS]
+
+${SCRIPT_NAME} - System status and tunnel URL synchronization service
+
+This script runs continuously and performs:
+  - Monitors internet connectivity via ping (9.9.9.9)
+  - Collects system statistics:
+    * WiFi quality and signal strength
+    * Network TX bytes (transmitted data)
+    * CPU temperature
+    * Ping latency to netstorm.site
+  - Synchronizes tunnel URLs to server (url.tmp, url2.tmp, url3.tmp, url4.tmp, ssh2.tmp)
+  - Updates server status every 10 seconds
+
+OPTIONS:
+    -h, --help      Show this help message
+    -v, --version   Show version information
+    -d, --debug     Enable debug mode (set -x)
+
+ENVIRONMENT VARIABLES:
+    DEVICE_ID       Camera device ID (default: cam1)
+    BASE_URL        Server base URL (default: http://netstorm.site/cam1)
+
+EXAMPLES:
+    ${0##*/}                           # Run with defaults
+    DEVICE_ID=cam2 ${0##*/}            # Run for camera 2
+    ${0##*/} --help                    # Show this help
+
+EXIT CODES:
+    0    Success (never reached, runs infinitely)
+    1    General error (cleanup triggered)
+
+FILES:
+    /tmp/status.tmp                System status file (local)
+    /tmp/url.tmp                   Tunnel URL 1
+    /tmp/url2.tmp                  Tunnel URL 2
+    /tmp/url3.tmp                  Tunnel URL 3
+    /tmp/url4.tmp                  Tunnel URL 4
+    /tmp/ssh2.tmp                  SSH tunnel URL
+
+AUTHOR:
+    Written by ${SCRIPT_AUTHOR}
+
+REPORTING BUGS:
+    Report bugs to: http://netstorm.site/support
+EOF
+    exit 0
+}
+
+#===============================================================================
+# Cleanup trap
+#===============================================================================
+
+#######################################
+# Cleanup handler for EXIT/INT/TERM signals.
+# Terminates all background jobs gracefully.
+# Arguments:
+#   $1 - Optional exit code (default: 0)
+# Returns:
+#   Exits with provided code or 0
+#######################################
 cleanup() {
-    local exit_code=${1:-$?}
-
-    # Kill any background jobs silently
-    local pid
-    for pid in $(jobs -p 2>/dev/null); do
-        kill -TERM "$pid" 2>/dev/null || :
-        wait "$pid" 2>/dev/null || :
-    done
-
-    exit "$exit_code"
+    local pids
+    pids="$(jobs -p 2>/dev/null)" || :
+    [[ -n $pids ]] && {
+        echo "$pids" | xargs -r kill -TERM 2>/dev/null || :
+        echo "$pids" | xargs -r wait 2>/dev/null || :
+    }
+    exit "${1:-0}"
 }
 
-
+#######################################
+# Error trap handler for ERR signal.
+# Logs error details to stderr and uploads to server log.
+# Globals:
+#   BASH_LINENO
+#   FUNCNAME
+#   BASH_COMMAND
+#   BASE_URL
+# Outputs:
+#   Writes error message to stderr
+# Returns:
+#   None (trap handler)
+#######################################
 err_trap() {
-    local exit_code=$? line="${BASH_LINENO[0]}" func="${FUNCNAME[1]:-main}"
-    printf '[ERROR] %s:%s (exit %d)\n' "$func" "$line" "$exit_code" >&2
-}
+    local exit_code=$?
+    local line="${BASH_LINENO[0]}"
+    local func="${FUNCNAME[1]:-main}"
+    local cmd="${BASH_COMMAND}"
 
+    printf '[%s] [ERROR] Command failed (exit %s) at line %s in %s(): %s\n' \
+        "$(date '+%H:%M:%S')" "$exit_code" "$line" "$func" "$cmd" >&2
+
+    curl -sf --data "file=log/error.txt&data=[CRITICAL] SYNC Line ${line} in ${func}(): ${cmd} (exit ${exit_code})" \
+        "${BASE_URL}/storage.php" -m 2 >/dev/null 2>&1 || :
+}
 
 trap 'cleanup $?' EXIT INT TERM
 trap err_trap ERR
 
-
 #===============================================================================
-# LOGGING
-#===============================================================================
-log() {
-    printf '[%s] [%s] %s\n' "$(date '+%H:%M:%S')" "$1" "$2"
-}
-
-
-log_web() {
-    local level="$1" msg="$2"
-    local data
-    data="${level} ${msg} $(TZ=Asia/Kuwait date '+%d/%m %H:%M:%S')"
-
-    # Single attempt, max 2s timeout - fail silently
-    curl -sf --max-time 2 --data-urlencode "file=log/log.txt" \
-        --data-urlencode "data=$data" "${BASE_URL}/storage.php" >/dev/null 2>&1 || :
-}
-
-
-#===============================================================================
-# FUNCTIONS
+# Functions
 #===============================================================================
 
-# Check internet connectivity
+#######################################
+# Check internet connectivity using ping to 9.9.9.9 (Quad9 DNS).
+# POSIX-compliant implementation using ping instead of /dev/tcp.
+# Returns:
+#   0 if internet is reachable, 1 if unreachable
+#######################################
 check_internet() {
     ping -q -c 1 -W 1 9.9.9.9 >/dev/null 2>&1
 }
 
-
-# Get WiFi signal quality (Pure Bash)
+#######################################
+# Get WiFi signal quality rating.
+# Maps signal level (dBm) to human-readable quality description.
+# Outputs:
+#   Writes quality rating to stdout (Excellent/Very Good/Good/Regular/Bad/Unknown)
+# Returns:
+#   0 always
+#######################################
 get_wifi_quality() {
     local signal_line level
     signal_line="$(iwconfig wlan0 2>/dev/null)" || { echo "Unknown"; return; }
@@ -92,24 +200,57 @@ get_wifi_quality() {
     fi
 }
 
-
-# Get TX bytes (Pure Bash)
+#######################################
+# Get network transmitted bytes in human-readable format.
+# Reads from sysfs and converts to B/KB/MB/GB.
+# Outputs:
+#   Writes transmitted bytes to stdout (e.g., 1234KB, 56MB)
+# Returns:
+#   0 always
+#######################################
 get_tx_bytes() {
-    local ifconfig_out
-    ifconfig_out="$(ifconfig wlan0 2>/dev/null)" || { echo "N/A"; return; }
+    local tx_file="/sys/class/net/wlan0/statistics/tx_bytes"
 
-    [[ $ifconfig_out =~ TX[^(]*\(([^)]+)\) ]] && echo "${BASH_REMATCH[1]}" || echo "N/A"
+    if [[ -r "$tx_file" ]]; then
+        local tx_bytes
+        tx_bytes=$(< "$tx_file") || { echo "N/A"; return; }
+
+        # Convert bytes to human readable (KB, MB, GB)
+        local units=("B" "KB" "MB" "GB")
+        local unit=0
+
+        while [[ $tx_bytes -ge 1024 ]] && [[ $unit -lt 3 ]]; do
+            tx_bytes=$((tx_bytes / 1024))
+            ((unit++)) || true
+        done
+
+        echo "${tx_bytes}${units[$unit]}"
+    else
+        echo "N/A"
+    fi
 }
 
-
-# Get CPU temperature (Pure Bash)
+#######################################
+# Get CPU temperature in Celsius.
+# Reads from sysfs thermal zone.
+# Outputs:
+#   Writes temperature to stdout (e.g., 45°C or N/A)
+# Returns:
+#   0 always
+#######################################
 get_cpu_temp() {
     local temp_file="/sys/class/thermal/thermal_zone0/temp"
     [[ -r $temp_file ]] && echo "$(($(< "$temp_file") / 1000))°C" || echo "N/A"
 }
 
-
-# Get ping time (Pure Bash)
+#######################################
+# Get ping latency to netstorm.site server.
+# POSIX-compliant implementation using standard ping command.
+# Outputs:
+#   Writes ping time to stdout (e.g., 12.5 ms or N/A)
+# Returns:
+#   0 always
+#######################################
 get_ping_time() {
     local ping_out
     ping_out="$(ping -c 1 -W 1 netstorm.site 2>/dev/null)" || { echo "N/A"; return; }
@@ -117,136 +258,72 @@ get_ping_time() {
     [[ $ping_out =~ time=([0-9.]+[[:space:]]*ms) ]] && echo "${BASH_REMATCH[1]}" || echo "N/A"
 }
 
-
-# Upload data with retry and URL encoding
+#######################################
+# Upload data to server via storage.php API.
+# Retries once on failure. Adds tmp/ prefix if missing.
+# Globals:
+#   BASE_URL
+#   DEBUG
+# Arguments:
+#   $1 - File path (relative to server root, e.g., status.tmp)
+#   $2 - Data content to upload
+# Outputs:
+#   Writes error details to stderr if DEBUG=1 and upload fails
+# Returns:
+#   0 on success, 1 after 2 failed attempts
+#######################################
 upload_data() {
-    local file=$1 data=$2 attempt
+    local file=$1 data=$2 attempt=0
 
-    # Add tmp/ prefix if not already present for proper routing
+    # Add tmp/ prefix if not already present for proper routing in storage.php
     [[ $file != tmp/* ]] && file="tmp/${file}"
 
-    for attempt in {1..2}; do
-        if curl -sf --max-time 10 -H 'Cache-Control: no-cache' \
-            --data-urlencode "file=${file}" \
-            --data-urlencode "data=${data}" \
-            "${BASE_URL}/storage.php" >/dev/null 2>&1; then
-            [[ $attempt -gt 1 ]] && log "INFO" "Upload succeeded on attempt $attempt: ${file##*/}"
-            return 0
-        fi
+    while ((attempt++ < 2)); do
+        curl -sf -H 'Cache-Control: no-cache' --data "file=${file}&data=${data}" "${BASE_URL}/storage.php" -m 10 >/dev/null 2>&1 && return 0
         sleep 1
     done
 
-    log "WARN" "Upload failed after 2 attempts: ${file##*/}"
+    # Log upload failure (silent in production but useful for debugging)
+    [[ "${DEBUG:-0}" == "1" ]] && {
+        printf '[ERROR %s] Failed to upload after 2 attempts\n' "$(date '+%H:%M:%S')" >&2
+        printf '[ERROR %s] File: %s, Data length: %s bytes\n' "$(date '+%H:%M:%S')" "$file" "${#data}" >&2
+        printf '[ERROR %s] Target: %s/storage.php\n' "$(date '+%H:%M:%S')" "$BASE_URL" >&2
+        printf '[ERROR %s] Possible causes: network down, server offline, timeout\n' "$(date '+%H:%M:%S')" >&2
+        printf '[ERROR %s] Test: curl -I %s/storage.php\n' "$(date '+%H:%M:%S')" "$BASE_URL" >&2
+    }
     return 1
 }
 
-
-# Sync tunnel URLs in parallel
+#######################################
+# Synchronize all tunnel URL files to server.
+# Uploads url.tmp, url2.tmp, url3.tmp, url4.tmp, ssh2.tmp in parallel.
+# Skips missing files silently.
+# Returns:
+#   0 when all background uploads complete
+#######################################
 sync_tunnel_urls() {
     local file data
-
     for file in url.tmp url2.tmp url3.tmp url4.tmp ssh2.tmp; do
         [[ -f $file ]] || continue
-
-        # Read file content
         data="$(<"$file")"
-
-        # Verify file has content
-        if [[ -n $data ]]; then
-            upload_data "$file" "$data" &
-        fi
+        upload_data "$file" "$data" &
     done
-
     wait
 }
 
+#===============================================================================
+# Main Loop
+#===============================================================================
 
-#===============================================================================
-# MAIN LOOP
-#===============================================================================
+#######################################
+# Main service loop for system status synchronization.
+# Continuously monitors internet, collects stats, and uploads to server.
+# Runs every 10 seconds.
+# Returns:
+#   Never returns (infinite loop until signal)
+#######################################
 main() {
-    log "INFO" "=== SYNC SERVICE STARTED ==="
-    log_web "INFO" "Sync Service Started"
-
     while true; do
-        # Check for remote reboot/shutdown triggers from VPS
-        local remote_reboot remote_shutdown
-        remote_reboot=$(curl -sf --max-time 2 "${BASE_URL}/tmp/reboot.tmp" 2>/dev/null || echo "")
-        remote_shutdown=$(curl -sf --max-time 2 "${BASE_URL}/tmp/shutdown.tmp" 2>/dev/null || echo "")
-
-        # If remote trigger exists, create local trigger with metadata (IP|TIMESTAMP)
-        if [[ -n "$remote_reboot" ]]; then
-            # Save trigger data (IP|TIMESTAMP from website) to local file
-            echo "$remote_reboot" > /tmp/reboot.tmp 2>/dev/null
-            # Clear remote trigger using storage.php (write empty = delete)
-            curl -sf --max-time 2 --data-urlencode "file=tmp/reboot.tmp" \
-                --data-urlencode "data=" "${BASE_URL}/storage.php" >/dev/null 2>&1 || :
-        fi
-
-        if [[ -n "$remote_shutdown" ]]; then
-            # Save trigger data (IP|TIMESTAMP from website) to local file
-            echo "$remote_shutdown" > /tmp/shutdown.tmp 2>/dev/null
-            # Clear remote trigger using storage.php (write empty = delete)
-            curl -sf --max-time 2 --data-urlencode "file=tmp/shutdown.tmp" \
-                --data-urlencode "data=" "${BASE_URL}/storage.php" >/dev/null 2>&1 || :
-        fi
-
-        # Check for shutdown trigger (highest priority)
-        # Only execute if file is less than 20 seconds old (prevent old triggers!)
-        if [[ -f /tmp/shutdown.tmp ]]; then
-            local file_age now file_time
-            now=$(date +%s)
-            file_time=$(stat -c %Y /tmp/shutdown.tmp 2>/dev/null || echo 0)
-            file_age=$((now - file_time))
-
-            if ((file_age < 20)); then
-                # Read trigger metadata from local file (format: IP|TIMESTAMP from website)
-                local trigger_info
-                trigger_info=$(cat /tmp/shutdown.tmp 2>/dev/null || echo "unknown|unknown")
-
-                # Create flag file with IP and request time for boot.sh logging
-                echo "$trigger_info" > /tmp/.shutdown_requested 2>/dev/null || :
-                sync  # Force write to disk before system shutdown
-
-                log "WARN" "Shutdown trigger detected (age: ${file_age}s) - executing..."
-                log_web "INFO" "Shutdown Executing - System Going Down"
-                rm -f /tmp/shutdown.tmp
-                sleep 1
-                sudo shutdown now 2>/dev/null || log "ERROR" "Shutdown failed (no sudo?)"
-            else
-                log "INFO" "Ignoring old shutdown trigger (age: ${file_age}s)"
-                rm -f /tmp/shutdown.tmp
-            fi
-        fi
-
-        # Check for reboot trigger
-        # Only execute if file is less than 20 seconds old
-        if [[ -f /tmp/reboot.tmp ]]; then
-            local file_age now file_time
-            now=$(date +%s)
-            file_time=$(stat -c %Y /tmp/reboot.tmp 2>/dev/null || echo 0)
-            file_age=$((now - file_time))
-
-            if ((file_age < 20)); then
-                # Read trigger metadata from local file (format: IP|TIMESTAMP from website)
-                local trigger_info
-                trigger_info=$(cat /tmp/reboot.tmp 2>/dev/null || echo "unknown|unknown")
-
-                # Create flag file with IP and request time for boot.sh logging
-                echo "$trigger_info" > /tmp/.reboot_requested 2>/dev/null || :
-                sync  # Force write to disk before system reboot
-
-                log "WARN" "Reboot trigger detected (age: ${file_age}s) - executing..."
-                log_web "INFO" "Reboot Executing - System Restarting"
-                rm -f /tmp/reboot.tmp
-                sleep 1
-                sudo reboot 2>/dev/null || log "ERROR" "Reboot failed (no sudo?)"
-            else
-                log "INFO" "Ignoring old reboot trigger (age: ${file_age}s)"
-                rm -f /tmp/reboot.tmp
-            fi
-        fi
-
         if check_internet; then
             # Gather system stats
             local tx_bytes cpu_temp ping_time wifi_quality status_data
@@ -263,13 +340,26 @@ main() {
             echo "$status_data" > status.tmp 2>/dev/null || :
             upload_data "status.tmp" "$status_data" &
 
-            # Sync tunnel URLs in parallel
+            # Sync tunnel URLs
             sync_tunnel_urls
         fi
 
-        sleep 10  # HTTP fallback - update every 10 seconds
+        sleep 5  # FAST MODE - reduced from 10s
     done
 }
 
-
-main "$@"
+#===============================================================================
+# PARSE COMMAND LINE ARGUMENTS
+#===============================================================================
+# Parse arguments before main
+[[ "${BASH_SOURCE[0]}" == "${0}" ]] && {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)    show_help ;;
+            -v|--version) show_version ;;
+            -d|--debug)   set -x; shift ;;
+            *)            echo "Unknown option: $1" >&2; show_help ;;
+        esac
+    done
+    main
+}
