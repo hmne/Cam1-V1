@@ -8,7 +8,7 @@
  * @package   Frontend
  * @author    Net Storm
  * @license   Proprietary
- * @version   1.0.0 - Vanilla JS Rewrite
+ * @version   5.0.0 - Vanilla JS Rewrite
  * @standards ES6+, JSDoc, Clean Code
  *
  * Features:
@@ -260,12 +260,6 @@
                 captureImage();
             }
 
-            // C key: Capture image
-            if (e.keyCode === 67) {
-                e.preventDefault();
-                captureImage();
-            }
-
             // L key: Toggle live stream
             if (e.keyCode === 76) {
                 const select = $('#webLiveSelect');
@@ -274,15 +268,6 @@
                     const newState = currentState === 'on' ? 'off' : 'on';
                     select.value = newState;
                     toggleWebLive();
-                }
-            }
-
-            // S key: Save image to device
-            if (e.keyCode === 83) {
-                e.preventDefault();
-                if (typeof window.saveImageToDevice === 'function') {
-                    window.saveImageToDevice();
-                    console.log(`[${CONFIG.CAM}] ⌨️ Keyboard shortcut: Save (S)`);
                 }
             }
         });
@@ -457,20 +442,6 @@
     }
 
     /**
-     * Update control panel visibility based on mode.php data attribute
-     */
-    function updateControlPanelVisibility() {
-        const stateElement = $('#controlPanelState');
-        if (stateElement) {
-            const shouldShow = stateElement.getAttribute('data-show-panel') === 'true';
-            const form = $('#myForm');
-            if (form) {
-                form.style.display = shouldShow ? 'block' : 'none';
-            }
-        }
-    }
-
-    /**
      * Load and display camera status
      */
     function loadCameraStatus() {
@@ -486,8 +457,6 @@
                     container.innerHTML = response;
                     // Execute scripts that came with the HTML
                     executeScripts(container);
-                    // Update control panel visibility based on data attribute
-                    updateControlPanelVisibility();
                 }
                 manageLiveStreamBasedOnStatus();
             },
@@ -727,10 +696,9 @@
             imageDetails.className = 'glass-panel image-details-panel';
         }
 
-        // Update loading message with download button
+        // Update loading message
         imageDetails.innerHTML = `
-            <span id="imageSizeText" class="image-size-text">Loading image size...</span>
-            <button onclick="saveImageToDevice()" class="save-btn" title="Save to device (S)" style="margin-left: 10px;">💾</button>
+            <p id="imageSizeText" class="image-size-text">Loading image size...</p>
         `;
 
         // Insert containers if they don't exist
@@ -766,13 +734,13 @@
                     const sizeText = $('#imageSizeText');
                     if (sizeText) {
                         sizeText.className = 'data-text';
-                        sizeText.innerHTML = `Image size: ${sizeData} <span class="capture-time">Time: ${captureTime}s</span>`;
+                        sizeText.innerHTML = `Image size: ${sizeData} <span class="capture-time">Image size: ${captureTime}s</span>`;
                     }
                 },
                 error: function() {
                     const sizeText = $('#imageSizeText');
                     if (sizeText) {
-                        sizeText.innerHTML = `Image size: Unknown <span class="capture-time">Time: ${captureTime}s</span>`;
+                        sizeText.innerHTML = `Image size: Unknown <span class="capture-time">Image size: ${captureTime}s</span>`;
                     }
                 }
             });
@@ -1040,10 +1008,6 @@
                 console.log(`[${CONFIG.CAM}] ✅ Live stream recovered`);
                 state.liveErrorCount = 0;
             }
-
-            // Clear handlers to prevent memory leak
-            this.onload = null;
-            this.onerror = null;
         };
 
         img.onerror = function() {
@@ -1056,10 +1020,6 @@
                 stopLiveStreamSilent();
                 state.liveErrorCount = 0;
             }
-
-            // Clear handlers to prevent memory leak
-            this.onload = null;
-            this.onerror = null;
         };
 
         img.src = 'live.jpg?' + Date.now();

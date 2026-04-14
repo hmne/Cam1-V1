@@ -14,7 +14,7 @@
  * @package   Frontend
  * @author    Net Storm
  * @license   Proprietary
- * @version   1.0.0 - Performance & Memory Optimized
+ * @version   5.0.0 - Performance & Memory Optimized
  * @standards ES5+, JSDoc, Clean Code
  *
  * Features:
@@ -51,9 +51,9 @@
         CAM: window.CAMERA_NAME || 'Camera',
         STATUS_UPDATE_INTERVAL: 2000,
         LIVE_UPDATE_INTERVAL: 1500,
-        CAPTURE_CHECK_FAST: 10,
-        CAPTURE_CHECK_SLOW: 150,
-        CAPTURE_MAX_ATTEMPTS: 300,
+        CAPTURE_CHECK_FAST: 25,
+        CAPTURE_CHECK_SLOW: 200,
+        CAPTURE_MAX_ATTEMPTS: 200,
         OFFLINE_THRESHOLD: 7,
         LIVE_ERROR_THRESHOLD: 7,
         CAPTURE_RESTORE_DELAY: 500,
@@ -98,10 +98,6 @@
         statusRetryCount: 0,
         firstLoad: true,
         sessionId: null,
-        // Smart error logging
-        consecutiveStatusErrors: 0,
-        lastStatusErrorLogged: 0,
-        wasStatusOffline: false,
         // Memory management
         imageObjects: [],
         isPageVisible: true,
@@ -114,15 +110,11 @@
     // ========================================================================
     // BROWSER NOTIFICATIONS
     // ========================================================================
-    // NOTE: When WebSocket is active, notifications come from websocket-client.js
-    // based on VPS events (camera_online/camera_offline). This is more accurate
-    // because it reflects the actual WebSocket connection state.
-    // HTTP fallback mode uses these functions based on status.tmp file age.
 
     /**
-     * Check browser notification permission status (don't request - needs user gesture)
+     * Request browser notification permission
      */
-    function checkNotificationPermission() {
+    function requestNotificationPermission() {
         if (!('Notification' in window)) {
             console.log(`[${CONFIG.CAM}] Browser does not support notifications`);
             return;
@@ -131,15 +123,13 @@
         if (Notification.permission === 'granted') {
             state.notificationsEnabled = true;
             console.log(`[${CONFIG.CAM}] 🔔 Notifications enabled`);
-        } else {
-            state.notificationsEnabled = false;
-            console.log(`[${CONFIG.CAM}] 🔔 Notification permission: ${Notification.permission}`);
+        } else if (Notification.permission !== 'denied') {
+            Notification.requestPermission().then(function(permission) {
+                state.notificationsEnabled = (permission === 'granted');
+                console.log(`[${CONFIG.CAM}] 🔔 Notification permission: ${permission}`);
+            });
         }
     }
-
-    // Cooldown for notifications
-    var lastBrowserNotificationTime = 0;
-    var BROWSER_NOTIFICATION_COOLDOWN = 30000; // 30 seconds
 
     /**
      * Send browser notification for status change
@@ -156,19 +146,11 @@
             return;
         }
 
-        // Cooldown check - prevent spam
-        var now = Date.now();
-        if (now - lastBrowserNotificationTime < BROWSER_NOTIFICATION_COOLDOWN) {
-            console.log(`[${CONFIG.CAM}] Notification skipped (cooldown)`);
-            return;
-        }
-        lastBrowserNotificationTime = now;
-
         var notification = new Notification(title, {
             body: body,
             icon: 'assets/images/logo.ico',
             tag: CONFIG.CAM + '-status',
-            renotify: false // Don't spam
+            renotify: true
         });
 
         setTimeout(function() {
@@ -333,8 +315,8 @@
             }
         });
 
-        // Check notification permission status (don't request - needs user gesture)
-        checkNotificationPermission();
+        // Request browser notification permission
+        requestNotificationPermission();
 
         $.ajax({
             url: 'tmp/web_live.tmp',
@@ -496,17 +478,6 @@
         }, CONFIG.STATUS_UPDATE_INTERVAL);
     }
 
-    function updateControlPanelVisibility() {
-        const $stateElement = $('#controlPanelState');
-        if ($stateElement.length) {
-            const shouldShow = $stateElement.data('show-panel') === true || $stateElement.data('show-panel') === 'true';
-            const $form = $('#myForm');
-            if ($form.length) {
-                $form.css('display', shouldShow ? 'block' : 'none');
-            }
-        }
-    }
-
     function loadCameraStatus() {
         $.ajax({
             url: 'mode.php?t=' + generateCacheBuster(),
@@ -517,16 +488,7 @@
             success: function(response) {
                 state.statusRetryCount = 0;
                 state.firstLoad = false;
-
-                // Log recovery if we were in error state
-                if (state.consecutiveStatusErrors > 0) {
-                    console.log(`[${CONFIG.CAM}] ✅ Connection restored after ${state.consecutiveStatusErrors} errors`);
-                    state.consecutiveStatusErrors = 0;
-                    state.wasStatusOffline = false;
-                }
-
                 $('#id1').html(response);
-                updateControlPanelVisibility();
                 manageLiveStreamBasedOnStatus();
             },
             error: function(xhr) {
@@ -539,29 +501,11 @@
                 if (!state.firstLoad) {
                     $('#id1').html('<span class="camera-offline">Camera Offline</span>');
                 }
-
-                // Smart error logging - only log on state changes or periodically
-                state.consecutiveStatusErrors++;
-                const shouldLog = (
-                    state.consecutiveStatusErrors === 1 ||  // First error
-                    state.consecutiveStatusErrors % 10 === 0 ||  // Every 10th error
-                    xhr.status !== state.lastStatusErrorLogged  // Different error type
-                );
-
-                if (shouldLog) {
-                    if (state.consecutiveStatusErrors === 1) {
-                        console.warn(`[${CONFIG.CAM}] ⚠️ mode.php connection lost - HTTP ${xhr.status}`);
-                    } else {
-                        console.warn(`[${CONFIG.CAM}] ⚠️ Still offline (${state.consecutiveStatusErrors} attempts) - HTTP ${xhr.status}`);
-                    }
-                    state.lastStatusErrorLogged = xhr.status;
-                }
-
+                console.log(`[${CONFIG.CAM}] mode.php load error - HTTP ${xhr.status}`);
                 window.cameraOnlineStatus = false;
                 window.secondsSinceUpdate = 999;
                 state.statusRetryCount = 0;
                 state.firstLoad = false;
-                state.wasStatusOffline = true;
                 manageLiveStreamBasedOnStatus();
             }
         });
@@ -574,12 +518,7 @@
         const isActuallyOnline = isOnline && secondsSince <= CONFIG.OFFLINE_THRESHOLD;
 
         // Send browser notification if status changed
-        // ONLY if WebSocket is NOT connected (HTTP fallback mode)
-        // When WebSocket is active, notifications come from websocket-client.js based on VPS events
-        const useHttpNotifications = !window.CameraWS || !window.CameraWS.enabled || !window.CameraWS.isConnected();
-        if (useHttpNotifications) {
-            checkStatusAndNotify(isActuallyOnline);
-        }
+        checkStatusAndNotify(isActuallyOnline);
 
         if (isActuallyOnline) {
             state.lastOnlineTime = now;
@@ -626,18 +565,11 @@
             state.isLiveActive = false;
             if (state.webLiveInterval) clearInterval(state.webLiveInterval);
             $('#webLiveSelect').val('off');
-
-            // PRIMARY: Try WebSocket first
-            if (window.CameraWS && window.CameraWS.enabled && window.CameraWS.isConnected()) {
-                window.CameraWS.stopLive();
-            } else {
-                // FALLBACK: Use HTTP
-                $.post('index.php', {
-                    action: 'write',
-                    file: 'tmp/web_live.tmp',
-                    data: 'off'
-                });
-            }
+            $.post('index.php', {
+                action: 'write',
+                file: 'tmp/web_live.tmp',
+                data: 'off'
+            });
         }
 
         state.captureLock = true;
@@ -659,22 +591,18 @@
             submit: 'submit'
         };
 
-        // Use HTTP for capture - fast, reliable, battle-tested
-        console.log(`[${CONFIG.CAM}] 📸 Triggering capture via HTTP`);
         $.post('index.php', formData)
             .done(function(response) {
                 if (response === 'BUSY') {
-                    console.warn(`[${CONFIG.CAM}] ⚠️ Camera busy`);
                     resetCaptureButton($button, originalText);
                     restoreLiveStreamIfNeeded(wasLiveActive);
                     alert('Camera is busy. Please wait and try again.');
                     return;
                 }
-                // Start polling for new image
                 checkForNewImage($button, originalText, beforeCaptureTime, 0, wasLiveActive);
             })
             .fail(function(error) {
-                console.error(`[${CONFIG.CAM}] ❌ Capture request failed:`, error);
+                console.error(`[${CONFIG.CAM}] ❌ Capture failed:`, error);
                 resetCaptureButton($button, originalText);
                 restoreLiveStreamIfNeeded(wasLiveActive);
                 alert('Failed to capture image. Please try again.');
@@ -735,13 +663,13 @@
                     <img id="Image" alt="Captured Image" loading="eager" class="captured-image">
                 </div>
                 <div id="imageDetails" class="glass-panel image-details-panel">
-                    <span id="imageSizeText" class="image-size-text">Loading image size...</span>
+                    <p id="imageSizeText" class="image-size-text">Loading image size...</p>
                 </div>
             `);
 
             $('form').closest('.glass-panel').after($imageContainer);
         } else {
-            $('#imageSizeText').html('Loading image size...');
+            $('#imageSizeText').html('<p class="image-size-text">Loading image size...</p>');
         }
 
         const newImage = createTrackedImage();
@@ -757,14 +685,16 @@
                     $('#imageSizeText').addClass('data-text').html(
                         'Image size: ' + sizeData +
                         ' <span class="capture-time">Time: ' + captureTime + 's</span>' +
-                        ' <button onclick="saveImageToDevice()" class="save-btn" title="Save to device (S)">💾</button>'
+                        ' <button onclick="saveImageToDevice()" class="save-btn" title="Save to device (S)">💾</button>' +
+                        ' <button onclick="extractTextFromImage()" class="ocr-btn" title="Copy text from image (O)">📋</button>'
                     );
                 })
                 .fail(function() {
                     $('#imageSizeText').html(
                         'Image size: Unknown' +
                         ' <span class="capture-time">Time: ' + captureTime + 's</span>' +
-                        ' <button onclick="saveImageToDevice()" class="save-btn" title="Save to device (S)">💾</button>'
+                        ' <button onclick="saveImageToDevice()" class="save-btn" title="Save to device (S)">💾</button>' +
+                        ' <button onclick="extractTextFromImage()" class="ocr-btn" title="Copy text from image (O)">📋</button>'
                     );
                 });
         };
@@ -849,18 +779,9 @@
 
         const savedQuality = localStorage.getItem('preferredQuality');
         $('#liveQuality').val(savedQuality || 'very-low');
-        const quality = savedQuality || 'very-low';
 
         updateLiveQuality(false);
 
-        // PRIMARY: Try WebSocket first (instant!)
-        if (window.CameraWS && window.CameraWS.enabled && window.CameraWS.isConnected()) {
-            console.log(`[${CONFIG.CAM}] ⚡ Using WebSocket for live start`);
-            window.CameraWS.startLive(quality);
-        }
-
-        // ALWAYS use HTTP fallback (fail-safe backup)
-        console.log(`[${CONFIG.CAM}] 🔄 Using HTTP fallback for live start`);
         $.post('index.php', {
             action: 'write',
             file: 'tmp/web_live.tmp',
@@ -868,7 +789,7 @@
         })
         .done(function(response) {
             if (response.trim() === 'OK') {
-                console.log(`[${CONFIG.CAM}] ▶️ Live stream ready (HTTP)`);
+                console.log(`[${CONFIG.CAM}] ▶️ Live stream ready`);
                 setTimeout(function() {
                     $('#loadingIndicator').remove();
                     startLiveUpdates();
@@ -892,14 +813,6 @@
         $('#webLiveContainer').fadeOut();
         $('#loadingIndicator').remove();
 
-        // PRIMARY: Try WebSocket first (instant!)
-        if (window.CameraWS && window.CameraWS.enabled && window.CameraWS.isConnected()) {
-            console.log(`[${CONFIG.CAM}] ⚡ Using WebSocket for live stop`);
-            window.CameraWS.stopLive();
-        }
-
-        // ALWAYS use HTTP fallback (fail-safe backup)
-        console.log(`[${CONFIG.CAM}] 🔄 Using HTTP fallback for live stop`);
         $.post('index.php', {
             action: 'write',
             file: 'tmp/web_live.tmp',
@@ -1004,6 +917,149 @@
     // SAVE IMAGE TO DEVICE
     // ========================================================================
 
+    window.saveImageToDevice = function() {
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-').replace('T', '_');
+        const filename = CONFIG.CAM + '_' + timestamp + '.jpg';
+
+        const link = document.createElement('a');
+        link.href = 'pic.jpg?download=' + generateCacheBuster();
+        link.download = filename;
+        link.style.display = 'none';
+
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+
+        console.log(`[${CONFIG.CAM}] 💾 Saving image as: ${filename}`);
+    };
+
+    // ========================================================================
+    // OCR - EXTRACT TEXT FROM IMAGE
+    // ========================================================================
+
+    window.extractTextFromImage = function() {
+        const $button = $('.ocr-btn');
+        const originalContent = $button.html();
+
+        // Disable button and show loading
+        $button.prop('disabled', true).html('⏳').addClass('loading');
+        console.log(`[${CONFIG.CAM}] 📋 Extracting text from image...`);
+
+        $.ajax({
+            url: 'ocr.php',
+            type: 'POST',
+            data: { image: 'pic.jpg' },
+            dataType: 'json',
+            timeout: 30000
+        })
+        .done(function(response) {
+            if (response.success && response.hasText) {
+                // Copy text to clipboard
+                copyToClipboard(response.text)
+                    .then(function() {
+                        $button.html('✅').removeClass('loading');
+                        console.log(`[${CONFIG.CAM}] ✅ Text copied to clipboard (${response.charCount} chars)`);
+
+                        // Show success notification
+                        showNotification('Text copied! (' + response.charCount + ' chars)');
+
+                        // Reset button after 2 seconds
+                        setTimeout(function() {
+                            $button.prop('disabled', false).html(originalContent);
+                        }, 2000);
+                    })
+                    .catch(function(err) {
+                        $button.html('❌').removeClass('loading');
+                        console.error(`[${CONFIG.CAM}] ❌ Failed to copy: ${err}`);
+                        showNotification('Failed to copy text');
+                        setTimeout(function() {
+                            $button.prop('disabled', false).html(originalContent);
+                        }, 2000);
+                    });
+            } else if (response.success && !response.hasText) {
+                $button.html('⚠️').removeClass('loading');
+                console.log(`[${CONFIG.CAM}] ⚠️ No text found in image`);
+                showNotification('No text found in image');
+                setTimeout(function() {
+                    $button.prop('disabled', false).html(originalContent);
+                }, 2000);
+            } else {
+                $button.html('❌').removeClass('loading');
+                console.error(`[${CONFIG.CAM}] ❌ OCR error: ${response.error}`);
+                showNotification('Error: ' + response.error);
+                setTimeout(function() {
+                    $button.prop('disabled', false).html(originalContent);
+                }, 2000);
+            }
+        })
+        .fail(function(xhr, status, error) {
+            $button.html('❌').removeClass('loading');
+            let errorMsg = 'OCR service unavailable';
+            if (xhr.responseJSON && xhr.responseJSON.error) {
+                errorMsg = xhr.responseJSON.error;
+            }
+            console.error(`[${CONFIG.CAM}] ❌ OCR failed: ${errorMsg}`);
+            showNotification(errorMsg);
+            setTimeout(function() {
+                $button.prop('disabled', false).html(originalContent);
+            }, 2000);
+        });
+    };
+
+    function copyToClipboard(text) {
+        // Modern clipboard API
+        if (navigator.clipboard && window.isSecureContext) {
+            return navigator.clipboard.writeText(text);
+        }
+
+        // Fallback for older browsers
+        return new Promise(function(resolve, reject) {
+            const textArea = document.createElement('textarea');
+            textArea.value = text;
+            textArea.style.position = 'fixed';
+            textArea.style.left = '-999999px';
+            textArea.style.top = '-999999px';
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+
+            try {
+                const successful = document.execCommand('copy');
+                document.body.removeChild(textArea);
+                if (successful) {
+                    resolve();
+                } else {
+                    reject('Copy command failed');
+                }
+            } catch (err) {
+                document.body.removeChild(textArea);
+                reject(err);
+            }
+        });
+    }
+
+    function showNotification(message) {
+        // Remove existing notification
+        $('.ocr-notification').remove();
+
+        // Create notification element
+        const $notification = $('<div class="ocr-notification">' + message + '</div>');
+        $('body').append($notification);
+
+        // Animate in
+        setTimeout(function() {
+            $notification.addClass('show');
+        }, 10);
+
+        // Remove after 3 seconds
+        setTimeout(function() {
+            $notification.removeClass('show');
+            setTimeout(function() {
+                $notification.remove();
+            }, 300);
+        }, 3000);
+    }
+
     // ========================================================================
     // KEYBOARD SHORTCUTS
     // ========================================================================
@@ -1027,6 +1083,13 @@
                 e.preventDefault();
                 window.saveImageToDevice();
                 console.log(`[${CONFIG.CAM}] ⌨️ Keyboard shortcut: Save (S)`);
+                break;
+
+            case 'o':
+                // O = OCR (extract text)
+                e.preventDefault();
+                window.extractTextFromImage();
+                console.log(`[${CONFIG.CAM}] ⌨️ Keyboard shortcut: OCR (O)`);
                 break;
 
             case 'l':
