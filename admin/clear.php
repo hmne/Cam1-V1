@@ -12,7 +12,7 @@ declare(strict_types=1);
  * @package   CameraControl
  * @author    Net Storm
  * @license   Proprietary
- * @version   1.0.0
+ * @version   2.0.0
  * @standards PSR-12, OWASP, Clean Code
  */
 
@@ -577,14 +577,14 @@ if ($result === false) {
         
         <div class="button-container">
             <button class="button" onclick="window.location.href='tm.php'">مراقبة الخوادم</button>
-            <button class="button primary" onclick="window.location.href='/cam1-V1/'">العودة للصفحة الرئيسية</button>
+            <button class="button primary" onclick="window.location.href='/cam1/'">العودة للصفحة الرئيسية</button>
         </div>
     </div>
     
     <script>
         // Auto return to main page after 3 seconds
         setTimeout(function() {
-            window.location.href = '/cam1-V1/';
+            window.location.href = '/cam1/';
         }, 3000);
     </script>
 </body>

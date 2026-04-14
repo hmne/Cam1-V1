@@ -11,7 +11,7 @@ declare(strict_types=1);
  * @package   CameraControl
  * @author    Net Storm
  * @license   Proprietary
- * @version   1.0.0
+ * @version   2.0.0
  * @standards PSR-12, OWASP, Clean Code
  */
 
@@ -28,21 +28,25 @@ header('Content-Type: application/json; charset=UTF-8');
 validateAdminToken();
 
 try {
-    // Write shutdown trigger file with IP and timestamp for logging
-    // Format: IP|TIMESTAMP
-    $clientIP = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $timestamp = date('H:i:s');
-    $triggerData = $clientIP . '|' . $timestamp;
+    // Initialize SSH connection
+    $ssh = new SSHHelper();
 
-    $shutdownFile = __DIR__ . '/../tmp/shutdown.tmp';
-    $result = writeFileAtomic($shutdownFile, $triggerData);
+    if (!$ssh->connect()) {
+        throw new Exception('Failed to establish SSH connection');
+    }
 
-    if (!$result) {
-        throw new Exception('Failed to write shutdown trigger file');
+    // Execute shutdown command
+    $result = $ssh->executeCommand('sudo shutdown now', false);
+
+    if ($result === false) {
+        throw new Exception('Failed to execute shutdown command');
     }
 
     // Log success
-    logMessage("Shutdown trigger created by IP: {$clientIP} at {$timestamp}", 'INFO');
+    logMessage("Shutdown command sent successfully from IP: " . ($_SERVER['REMOTE_ADDR'] ?? 'unknown'), 'INFO');
+
+    // Disconnect
+    $ssh->disconnect();
 
     // Return success using helper function
     sendJsonResponse([

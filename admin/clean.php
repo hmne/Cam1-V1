@@ -11,7 +11,7 @@ declare(strict_types=1);
  * @package   CameraControl
  * @author    Net Storm
  * @license   Proprietary
- * @version   1.0.0
+ * @version   2.0.0
  * @standards PSR-12, OWASP, Clean Code
  */
 

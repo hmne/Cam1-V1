@@ -11,7 +11,7 @@ declare(strict_types=1);
  * @package   CameraControl
  * @author    Net Storm
  * @license   Proprietary
- * @version   1.0.0
+ * @version   2.0.0
  * @standards PSR-12, OWASP, Clean Code
  */
 
@@ -28,21 +28,25 @@ header('Content-Type: application/json; charset=UTF-8');
 validateAdminToken();
 
 try {
-    // Write reboot trigger file with IP and timestamp for logging
-    // Format: IP|TIMESTAMP
-    $clientIP = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $timestamp = date('H:i:s');
-    $triggerData = $clientIP . '|' . $timestamp;
+    // Initialize SSH connection
+    $ssh = new SSHHelper();
 
-    $rebootFile = __DIR__ . '/../tmp/reboot.tmp';
-    $result = writeFileAtomic($rebootFile, $triggerData);
+    if (!$ssh->connect()) {
+        throw new Exception('Failed to establish SSH connection');
+    }
 
-    if (!$result) {
-        throw new Exception('Failed to write reboot trigger file');
+    // Execute reboot command
+    $result = $ssh->executeCommand('sudo reboot', false);
+
+    if ($result === false) {
+        throw new Exception('Failed to execute reboot command');
     }
 
     // Log success
-    logMessage("Reboot trigger created by IP: {$clientIP} at {$timestamp}", 'INFO');
+    logMessage("Reboot command sent successfully from IP: " . ($_SERVER['REMOTE_ADDR'] ?? 'unknown'), 'INFO');
+
+    // Disconnect
+    $ssh->disconnect();
 
     // Return success using helper function
     sendJsonResponse([
